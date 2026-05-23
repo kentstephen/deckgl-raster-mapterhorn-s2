@@ -31,6 +31,24 @@ Give those vertices a real z and the imagery becomes a terrain surface. (Files:
 `node_modules/@developmentseed/deck.gl-raster/dist/raster-layer.js`,
 `.../dist/mesh-layer/mesh-layer.js`.)
 
+## Scope decisions (first pass)
+
+- **No elevation styling yet.** First pass is purely overlaying the Sentinel-2
+  imagery we already access onto the Mapterhorn terrain surface — no hillshade,
+  no colored relief. *TODO: style the elevation later; it makes sense eventually.*
+- **User-selectable DEM resolution.** Mapterhorn publishes several resolution
+  levels. Default to the highest available, add a new dashboard control to choose
+  among what's available, and always offer **flat** (terrain off).
+- **Resolution-mismatch caveat.** 1 m DEM under 10 m imagery may not be sensible
+  — factor this into which levels are exposed/allowed.
+- **Geographic scope: open.** CONUS-only is the low-risk start, but worldwide has
+  much better terrain to show. Undecided — keep both paths open.
+- **Scale is an unknown.** deck.gl required an explicit scale setting in prior
+  work; how scale behaves with Mapterhorn + deck.gl here is TBD — investigate
+  during the spike.
+- **Standing order:** always check Dev Seed `deck.gl-raster` examples and
+  Mapterhorn docs/examples before building the raster/DEM pieces.
+
 ## Path B — bake DEM elevation into the mesh (recommended)
 
 1. **DEM source + cache.** Pull Mapterhorn terrarium tiles (PMTiles). Implement

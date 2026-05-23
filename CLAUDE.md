@@ -61,6 +61,29 @@ Deck). Full fallbacks in `docs/ROADMAP.md`.
 > versions. **Check the latest from the Dev Seed repos before developing** and
 > pin versions.
 
+## Standing order — always check upstream
+
+Before writing or changing anything touching the deck.gl-raster pipeline or the
+DEM, **check upstream examples first** — Dev Seed's `deck.gl-raster` examples and
+Mapterhorn's own docs/examples. The libraries move fast; don't reinvent a pattern
+they already demonstrate. This is a recurring instruction, not a one-time step.
+
+## Scope for the first pass (per Stephen, 2026-05-22)
+
+- **No elevation styling yet.** No hillshade, no colored relief — just overlay
+  the Sentinel-2 imagery we already access onto the Mapterhorn terrain surface.
+  Styling the elevation is a **TODO** for later (it would make sense eventually).
+- **User picks DEM resolution.** Mapterhorn offers several res levels — default
+  to the **highest available**, but expose a new dashboard control to pick among
+  what's available, and **always allow flat** (no terrain).
+- **Resolution mismatch caveat.** A 1 m DEM under 10 m imagery may not make
+  sense; keep that in mind when choosing/limiting selectable levels.
+- **Geographic scope is open.** Tempting to start CONUS-only, but that misses a
+  lot of good terrain worldwide. Not decided — leave both directions open.
+- **Scale handling is an unknown.** deck.gl needed an explicit scale setting in
+  prior work; how scale interacts with Mapterhorn/deck.gl here is TBD — look into
+  it during the spike.
+
 ## What to copy from the predecessor
 
 The reference copy lives at `reference-sentinel-2-cog-deckgl-raster/` (local
