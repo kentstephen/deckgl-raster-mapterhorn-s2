@@ -80,6 +80,24 @@ they already demonstrate. This is a recurring instruction, not a one-time step.
   sense; keep that in mind when choosing/limiting selectable levels.
 - **Geographic scope is open.** Tempting to start CONUS-only, but that misses a
   lot of good terrain worldwide. Not decided — leave both directions open.
+  - **MVP starting area (Stephen, 2026-05-23): Mount Washington / the
+    Presidentials, NH.** Begin with the **default bounding box we'd pull from
+    the predecessor project** (sentinel-2-cog-deckgl-raster) for that area, and
+    **tune everything here first** before generalizing.
+  - **Update (Stephen, 2026-05-23): lock to CONUS to start.** Raise the **min
+    zoom** so we don't load all of CONUS at once, and **auto-load on
+    move/pan** instead. Realistic working extent is "a good chunk of California
+    + the Rockies, not much more" — **closer-in views are what matter**. No
+    override knob needed.
+  - Stick with the **10 m** DEM (don't chase Mapterhorn's hi-res EU levels):
+    Sentinel-2 is native 10 m, so a 1 m DEM under it doesn't make sense. This
+    format is the best fit for the imagery; we'll play with it.
+  - Note: COGs are likely **larger than the DEM tiles** (unconfirmed) — mind the
+    COG-extent vs DEM-tile-grid relationship when wiring loading.
+  - **Later (not first pass):** Mapterhorn appears to ship several
+    pre-processed viz varieties (hillshade, etc.). Let the user **drop the
+    satellite imagery and view those terrain renders** directly. All in good
+    time — the priority is to **drape the S2 over the Mapterhorn terrain**.
 - **Scale handling is an unknown.** deck.gl needed an explicit scale setting in
   prior work; how scale interacts with Mapterhorn/deck.gl here is TBD — look into
   it during the spike.
