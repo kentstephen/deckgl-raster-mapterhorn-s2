@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+wheels/
+*.egg-info
+
+# Python
+__pycache__/
+*.py[oc]
+.venv
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# Local Claude memory (per global rule: gitignored in every project)
+.claude/memory/
+
+# Reference copy of the predecessor repo (kept locally for context, not committed)
+reference-sentinel-2-cog-deckgl-raster/
+
+# Local settings
+.claude/settings.local.json
