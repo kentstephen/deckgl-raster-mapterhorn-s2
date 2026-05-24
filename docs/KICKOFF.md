@@ -5,9 +5,9 @@ or coding done yet** — this is the plan only. Target area for the MVP is **Mou
 Washington / the Presidentials, NH**, using the predecessor's default bounding
 box for that area, tuned here first before generalizing.
 
-Constraints locked: **S2 temporal-mosaic COGs in CONUS**, **10 m Mapterhorn DEM**
-(USGS-backed availability over Mount Washington), browser-only deck.gl + maplibre,
-no backend.
+Constraints locked: **S2 temporal-mosaic COGs in CONUS**, **USGS 3DEP 10 m DEM**
+(via AWS/Mapzen terrarium tiles — NOT Mapterhorn, which is 30 m over the US),
+browser-only deck.gl + maplibre, no backend.
 
 ---
 
@@ -17,45 +17,57 @@ no backend.
    `.claude/memory/TERRAIN_HANDOFF.md`, `.claude/memory/TERRAIN_RESEARCH.md`.
 2. Confirm the MVP scope hasn't changed since this file was written.
 
-## Phase 1 — Upstream check: deck.gl-raster (per standing order)
+## Phase 1 — Upstream check: deck.gl-raster ✅ DONE (2026-05-23 PM)
 
-Goal: confirm the mesh path described in the handoff still matches what's on the
-current `0.7` line before we build against it.
+Verified against the predecessor's installed `0.7.0` tree:
 
-3. Inspect the **predecessor's pinned versions** in
-   `reference-sentinel-2-cog-deckgl-raster/web/package.json` — record exact
-   `@developmentseed/deck.gl-raster`, `deck.gl-geotiff`, `geotiff`, deck.gl,
-   luma.gl, maplibre, react-map-gl versions.
-4. Check **upstream Dev Seed `deck.gl-raster`** for newer releases since those
-   pins: release notes / changelog for shader-pipeline shape changes, and
-   confirm `RasterLayer` → `MeshTextureLayer` (`extends SimpleMeshLayer`) is
-   still the render path and still hardcodes vertex `z = 0` in
-   `reprojectorToMesh`. Decide: pin to predecessor versions (safe) or bump.
-5. Review Dev Seed's **deck.gl-raster examples** for any pattern that already
-   does mesh-z / terrain / elevation — don't reinvent if they demonstrate it.
-6. Confirm the package still does **not** export `RasterMeshLayer` (Kyle Barron's
-   separate lib); our mesh path is `RasterLayer`/`MeshTextureLayer`.
+- **Pinned versions:** deck.gl-raster / deck.gl-geotiff / geotiff / proj = `0.7.0`;
+  `@deck.gl/core` 9.3.2; luma 9.3.3; maplibre-gl 5.24.0; react-map-gl 8.1.1.
+  Plan: **pin to these** (don't bump for the spike).
+- **Mesh path confirmed.** `RasterLayer._generateMesh()` → local
+  `reprojectorToMesh()`. **Injection point: `raster-layer.js:181`,
+  `positions[i*3+2] = 0`.** x,y (lines 178–179) are `exactOutputPositions` in
+  **3857** → convert to lon/lat for the DEM lookup.
+- `RasterReprojector` now lives in `@developmentseed/raster-reproject` 0.7.0
+  (2D positions only; z added by `reprojectorToMesh`). `RasterMeshLayer` is NOT
+  exported (that's Kyle Barron's lib) — our path is `RasterLayer`/`MeshTextureLayer`.
+- **`_generateMesh` is synchronous** ⇒ DEM tiles must be pre-cached before mesh
+  build; `elevationAt` is a sync cache lookup. Prefetch in `updateState` (or
+  rebuild the mesh once tiles land). Do NOT fetch DEM inside the mesh builder.
+- TODO at build time: still skim Dev Seed `deck.gl-raster` examples for any
+  ready-made mesh-z/terrain pattern before hand-rolling the injection.
 
-## Phase 2 — Upstream check + research: Mapterhorn DEM API
+## Phase 2 — DEM source ✅ RESEARCHED — pivot to USGS 10m (AWS terrain tiles)
 
-Follow the TERRAIN_HANDOFF instructions; fill the known unknowns.
+**Decision (Stephen, 2026-05-23): use the USGS 3DEP 10m DEM.** Mapterhorn does
+NOT carry it — Mapterhorn is Copernicus GLO-30 (30m) over the US (hi-res only in
+Europe/Switzerland). The USGS 3DEP 10m is published as terrarium tiles by
+Mapzen/AWS at `elevation-tiles-prod`:
 
-7. Read **Mapterhorn's own docs/examples** for the terrarium PMTiles API:
-   tile URL scheme, PMTiles access pattern from the browser, terrarium encoding
-   confirmation `(R*256 + G + B/256) - 32768`, and zoom/coverage levels.
-8. Confirm **10 m USGS-backed coverage over Mount Washington / Presidentials**
-   exists at the zoom levels we'll use; record the max usable zoom there.
-9. **Verify Mapterhorn DEM CORS** — confirm browser fetch of the PMTiles/tiles
-   is allowed from a localhost dev origin. This is a hard gate; if blocked,
-   note the fallback (proxy / alternate host) before building.
-10. Pick the PMTiles reader approach (e.g. `pmtiles` lib) and confirm it plays
-    with the existing HTTP Range idiom from `loadGeotiff.ts`/`getTileData.ts`.
+- URL: `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`
+- Terrarium **PNG**, minzoom 0 / **maxzoom 15**, **10m 3DEP over CONUS** (3m in
+  spots), SRTM 30m elsewhere. Decode `(R*256 + G + B/256) - 32768`.
+- This is plain z/x/y PNG — **no PMTiles reader needed** (simpler than Mapterhorn's
+  WebP PMTiles). Fetch PNG → draw to canvas / `createImageBitmap` → read pixels.
+
+Remaining Phase-2 tasks for 8 PM:
+
+7. **Verify `elevation-tiles-prod` CORS** from a localhost dev origin (hard gate).
+   If blocked: fallbacks are Mapterhorn 30m on source.coop (CORS-known-open) or a
+   dev proxy. Decode is identical, so the DEM module stays source-agnostic.
+8. Confirm 10m tiles render sane elevations over Mount Washington (z ~12–14;
+   maxzoom 15). Record the max usable zoom for the Presidentials.
+9. Keep the DEM module **source-agnostic** (terrarium decode + xyz fetch) so
+   Mapterhorn can plug in later as a selectable source.
 
 ## Phase 3 — Bounding box + sources for the MVP area
 
-11. Pull the **default Mount Washington bounding box** from the predecessor
-    (`stac.ts` / `App.tsx` initial view / any hardcoded extent) and record exact
-    coords + initial zoom/center to reuse here.
+11. **Set the Mount Washington bbox.** Note: the predecessor's default bbox is
+    `[-115.5, 31.5, -113.0, 33.5]` (Yuma AZ, ~2.5°×2°) — NOT NH. Mount Washington
+    ≈ 44.27 N, −71.30 W. Use a Presidentials bbox of similar span, e.g.
+    `[-71.55, 44.10, -71.05, 44.45]` (tighten for "closer-in"); set initial
+    view center ≈ `[-71.30, 44.27]`, zoom ~12. Reuse the predecessor's
+    `STAC_BBOX`/`initialViewState` mechanism, just with these coords.
 12. Confirm the **S2 mosaic COGs for that bbox** are reachable (STAC fetch +
     `data.source.coop` CORS-open host, 2022–2024 visible years).
 13. Note the **COG-extent vs DEM-tile-grid** relationship for this area (COGs
@@ -82,12 +94,15 @@ Follow the TERRAIN_HANDOFF instructions; fill the known unknowns.
 
 ## Phase 6 — Build Path B (only if spike is green)
 
-18. Implement `elevationAt(lon, lat) → meters`: in-memory Mapterhorn tile cache
-    (mirror `geotiffCache`), terrarium decode, bilinear sample within a tile.
+18. Implement `elevationAt(lon, lat) → meters`: in-memory terrarium-tile cache
+    (mirror `geotiffCache`), fetch xyz PNG from `elevation-tiles-prod`, decode to
+    pixels (canvas/`createImageBitmap`), terrarium decode, bilinear sample.
+    Keep the source pluggable (USGS 10m default; Mapterhorn later).
 19. Inject z into the mesh: vendor/subclass `RasterLayer` so each vertex gets
-    `z = elevationAt(x,y) * exaggeration` after the reprojection mesh is built
-    (3857 x,y → lon/lat). Hook the async DEM fetch before the mesh model is
-    created in `updateState`.
+    `z = elevationAt(x,y) * exaggeration` at `raster-layer.js:181` (3857 x,y →
+    lon/lat). **Prefetch the DEM tiles covering the COG tile in `updateState`
+    BEFORE `_generateMesh` runs** (it's synchronous) — or rebuild the mesh once
+    tiles land.
 20. Add the **exaggeration slider** (default ~1.5–2×).
 21. Add the **DEM resolution control**: default highest available here (10 m),
     always allow **flat** (no terrain).
@@ -106,7 +121,12 @@ Follow the TERRAIN_HANDOFF instructions; fill the known unknowns.
 
 ## Hard gates / risks to resolve early
 
-- **Mapterhorn CORS** (task 9) — blocks the whole DEM path if closed.
+- **`elevation-tiles-prod` CORS** (task 7) — blocks the USGS 10m path if closed;
+  fallback = Mapterhorn 30m (source.coop, CORS-open) or a dev proxy.
 - **Spike result** (task 16) — go/no-go for Path B vs the heavier Path A pivot.
-- **Version drift** on the `0.7` line (tasks 3–4) — pin before building.
+  This is the dominant unknown; everything else is wiring.
+- **Sync mesh build vs async DEM** (task 19) — prefetch-then-build ordering.
 - **Scale interaction** (task 17) — unknown, watch during spike.
+
+(Resolved already: deck.gl-raster mesh path + injection point + pinned versions
+— see Phase 1. DEM resolution question — see Phase 2: USGS 3DEP 10m, not Mapterhorn.)

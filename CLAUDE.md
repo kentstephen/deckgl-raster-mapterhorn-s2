@@ -89,9 +89,15 @@ they already demonstrate. This is a recurring instruction, not a one-time step.
     move/pan** instead. Realistic working extent is "a good chunk of California
     + the Rockies, not much more" — **closer-in views are what matter**. No
     override knob needed.
-  - Stick with the **10 m** DEM (don't chase Mapterhorn's hi-res EU levels):
-    Sentinel-2 is native 10 m, so a 1 m DEM under it doesn't make sense. This
-    format is the best fit for the imagery; we'll play with it.
+  - Stick with the **10 m** DEM: Sentinel-2 is native 10 m, so a 1 m DEM under it
+    doesn't make sense; 10 m is the best fit for the imagery.
+  - **DEM source correction (researched 2026-05-23):** the 10 m comes from
+    **USGS 3DEP**, delivered as terrarium tiles by AWS/Mapzen
+    (`elevation-tiles-prod`, PNG, maxzoom 15) — **not Mapterhorn**. Mapterhorn is
+    Copernicus **30 m** over the US (hi-res only in Europe/Switzerland), so it
+    can't serve the 10 m goal. Keep the DEM module source-agnostic (terrarium
+    decode works for both); default to USGS 10 m, keep Mapterhorn selectable for
+    later/EU. The repo name stays "mapterhorn" but the MVP DEM is USGS 3DEP.
   - Note: COGs are likely **larger than the DEM tiles** (unconfirmed) — mind the
     COG-extent vs DEM-tile-grid relationship when wiring loading.
   - **Later (not first pass):** Mapterhorn appears to ship several
