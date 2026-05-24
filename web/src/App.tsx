@@ -1,8 +1,4 @@
-import {
-  COGLayer,
-  MosaicLayer,
-  MultiCOGLayer,
-} from "@developmentseed/deck.gl-geotiff";
+import { MosaicLayer } from "@developmentseed/deck.gl-geotiff";
 import {
   COLORMAP_INDEX,
   createColormapTexture,
@@ -42,6 +38,7 @@ import { loadGeoTIFF } from "./loadGeotiff";
 import { getTileData, type S2TileData } from "./getTileData";
 import { renderTile } from "./renderTile";
 import { ElevatedCOGLayer } from "./raster/ElevatedCOGLayer";
+import { ElevatedMultiCOGLayer } from "./raster/ElevatedMultiCOGLayer";
 import { demZoomForMapZoom, terrainActiveAtZoom, subscribeDemTiles } from "./elevation";
 import {
   bandSlotsFor,
@@ -88,9 +85,9 @@ function getCachedGeoTIFF(url: string): Promise<GeoTIFF> {
 // (filtered out by stac.ts CORS_OK_HOSTS).
 const AVAILABLE_YEARS = [2022, 2023, 2024] as const;
 const DEFAULT_YEAR = 2023;
-// Mount Washington / the Presidential Range, NH — MVP starting area for the
-// terrain spike (highest relief in the Northeast; Mt Washington summit 1917 m).
-const STAC_BBOX: [number, number, number, number] = [-71.55, 44.1, -71.05, 44.45];
+// Grand Teton / Snake River — Jackson Hole, WY. Dramatic relief: the Tetons rise
+// ~2100 m straight off the valley floor (Grand Teton 4199 m).
+const STAC_BBOX: [number, number, number, number] = [-111.0, 43.5, -110.5, 44.0];
 // Ceiling for the "fetch viewport" AOI span (deg/axis) so a zoomed-out view
 // can't enumerate thousands of COGs. Matches geocode.ts's maxSpanDeg.
 const MAX_VIEWPORT_SPAN_DEG = 3.0;
@@ -476,7 +473,7 @@ export default function App() {
           );
           sourcesCache.current.set(cacheKey, sources);
         }
-        return new MultiCOGLayer({
+        return new (ElevatedMultiCOGLayer as any)({
           id: `s2-multi-${mode}-${gen}-${source.id}`,
           sources,
           composite,
@@ -486,12 +483,17 @@ export default function App() {
           // See docs/PERF_KNOBS.md for the full menu + drawbacks.
           refinementStrategy: "best-available",
           maxRequests: 16,
+          // Terrain: drape the index render over the DEM (same as RGB).
+          terrainEnabled: terrainActive,
+          exaggeration,
+          demZoom,
+          demVersion,
           // Inner RasterTileLayer caches each tile's renderPipeline result
           // (raster-tile-layer.ts:338 wires renderTile → renderSubLayers).
-          // Without this, colormap prop changes never reach already-rendered
-          // tiles.
+          // Without this, colormap/terrain prop changes never reach already-
+          // rendered tiles.
           updateTriggers: {
-            renderTile: [mode, ndviColormap, ndviRange[0], ndviRange[1], ndviScale, ndviReversed, colormapTexture],
+            renderTile: [mode, ndviColormap, ndviRange[0], ndviRange[1], ndviScale, ndviReversed, colormapTexture, terrainActive, exaggeration, demZoom, demVersion],
           },
         } as any);
       },
@@ -502,10 +504,9 @@ export default function App() {
   }, [stacItems, labelBeforeId, mode, gen, colormapTexture, colormapIndexMap, rgbGain, smoothing, terrainActive, exaggeration, demZoom, demVersion, ndviColormap, ndviRange, ndviScale, ndviReversed]);
 
   const initialViewState = {
-    // Mount Washington summit; zoom 13 puts us in Mapterhorn's usgs3dep13 (10 m)
-    // terrain range. Pitch stays 0 here — the spike pitches the map to test relief.
-    longitude: -71.3033,
-    latitude: 44.2706,
+    // Grand Teton summit, looking across Jackson Hole / the Snake River.
+    longitude: -110.8024,
+    latitude: 43.7412,
     zoom: 12, // wider than z13 so Sentinel-2 isn't over-zoomed; terrain on at z12
     // Tilt back so distant terrain fills toward the top of the screen, but keep
     // the top just BELOW the horizon (no sky/void) — the standard deck.gl 3D
