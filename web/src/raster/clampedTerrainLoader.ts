@@ -46,7 +46,12 @@ const MAX_ELEV_M = 9000;
 // replaced by the median. Tune from the ?demdebug histogram; 300 m is a
 // conservative start (real terrain rarely jumps >300 m across one 10 m pixel —
 // that's a >88% slope).
-const DESPECKLE_T = 300;
+const DESPECKLE_T = 120;
+
+// Number of median-replace passes. Iterating dissolves clustered spikes (lossy-
+// WebP ringing) that a single pass leaves behind. 3 handles clusters several
+// pixels wide; clean terrain is unaffected.
+const DESPECKLE_PASSES = 3;
 
 // Median window radius. r=1 → 3×3 (9 samples), r=2 → 5×5 (25 samples). A 3×3
 // median is polluted when ≥half its samples are bad — i.e. it fails on CLUSTERS
@@ -135,34 +140,50 @@ function getTerrainClamped(
 
   if (DEBUG && debugTilesLogged < DEBUG_TILE_LIMIT) logTileStats(raw, imageData, width, height, k);
 
-  // 2. Despeckle against the 3×3 median. Write into the martini-padded grid,
-  //    which is (width+1)×(height+1) with each row shifted by +1 (loaders.gl
-  //    convention) to leave room for the backfilled right-border column.
-  const terrain = new Float32Array((width + 1) * (height + 1));
+  // 2. Despeckle: repeated passes of conditional median-replace. A single pass
+  //    can't fix CLUSTERS of bad pixels (lossy-WebP ringing along ridge edges)
+  //    because >half the window is then bad and the median is itself polluted.
+  //    Iterating fixes it: each pass cleans the cluster's outer ring (its window
+  //    now has enough good neighbors), so clusters dissolve from the edges in.
+  //    Clean terrain is untouched (|v − med| ≤ T keeps the original value).
+  //    Double-buffered so a pass reads a stable grid.
   const r = DESPECKLE_R;
   const nbr: number[] = new Array((2 * r + 1) * (2 * r + 1));
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = y * width + x;
-      let n = 0;
-      for (let dy = -r; dy <= r; dy++) {
-        const yy = y + dy;
-        if (yy < 0 || yy >= height) continue;
-        for (let dx = -r; dx <= r; dx++) {
-          const xx = x + dx;
-          if (xx < 0 || xx >= width) continue;
-          const nv = raw[yy * width + xx];
-          if (!Number.isNaN(nv)) nbr[n++] = nv;
+  let cur = raw;
+  for (let pass = 0; pass < DESPECKLE_PASSES; pass++) {
+    const out = new Float32Array(width * height);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = y * width + x;
+        let nn = 0;
+        for (let dy = -r; dy <= r; dy++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= height) continue;
+          for (let dx = -r; dx <= r; dx++) {
+            const xx = x + dx;
+            if (xx < 0 || xx >= width) continue;
+            const nv = cur[yy * width + xx];
+            if (!Number.isNaN(nv)) nbr[nn++] = nv;
+          }
         }
+        const med = medianOf(nbr, nn);
+        const v = cur[idx];
+        out[idx] = !Number.isNaN(v) && Math.abs(v - med) <= tHi ? v : med;
       }
-      const med = medianOf(nbr, n);
-      const v = raw[idx];
-      const keep = !Number.isNaN(v) && Math.abs(v - med) <= tHi;
-      terrain[idx + y] = keep ? v : med;
     }
+    cur = out;
   }
 
-  // 3. Martini needs a power-of-two+1 grid: backfill bottom + right borders.
+  // 3. Write the cleaned grid into the martini-padded grid, which is
+  //    (width+1)×(height+1) with each row shifted by +1 (loaders.gl convention)
+  //    to leave room for the backfilled right-border column. Then backfill the
+  //    bottom + right borders (Martini needs a power-of-two+1 grid).
+  const terrain = new Float32Array((width + 1) * (height + 1));
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      terrain[y * width + x + y] = cur[y * width + x];
+    }
+  }
   for (let i = (width + 1) * width, x = 0; x < width; x++, i++) {
     terrain[i] = terrain[i - width - 1];
   }

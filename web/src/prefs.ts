@@ -77,3 +77,56 @@ export function saveColorPrefs(prefs: ColorPrefs): void {
     /* private mode / quota — preferences just won't persist */
   }
 }
+
+// ── Default camera view ─────────────────────────────────────────────────────
+// A user-set "home" view (the SET DEFAULT button). When present it overrides the
+// hardcoded initialViewState on load, so you land where you left it.
+const VIEW_KEY = "s2cog.defaultView.v1";
+
+export type SavedView = {
+  longitude: number;
+  latitude: number;
+  zoom: number;
+  pitch: number;
+  bearing: number;
+};
+
+export function loadDefaultView(): SavedView | null {
+  try {
+    const raw = localStorage.getItem(VIEW_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw) as Partial<SavedView>;
+    if (
+      typeof v.longitude === "number" &&
+      typeof v.latitude === "number" &&
+      typeof v.zoom === "number"
+    ) {
+      return {
+        longitude: v.longitude,
+        latitude: v.latitude,
+        zoom: v.zoom,
+        pitch: num(v.pitch, 0),
+        bearing: num(v.bearing, 0),
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveDefaultView(v: SavedView): void {
+  try {
+    localStorage.setItem(VIEW_KEY, JSON.stringify(v));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function clearDefaultView(): void {
+  try {
+    localStorage.removeItem(VIEW_KEY);
+  } catch {
+    /* ignore */
+  }
+}

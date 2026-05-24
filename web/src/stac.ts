@@ -26,18 +26,19 @@ export type PartialSTACItem = {
   bbox: [number, number, number, number];
   assets: {
     visual: { href: string };
+    B02: { href: string };
     B03: { href: string };
     B04: { href: string };
     B08: { href: string };
   };
 };
 
-// Bands the curated index set needs: B04(red) B08(NIR) for NDVI, B03(green) for
-// NDWI. All 10 m. B02 dropped (RGB renders the TCI `visual` asset, not a
-// B04/B03/B02 composite); B11 dropped with NDBI/NDMI — pairing 20 m SWIR with a
-// 10 m band seamed (see renderPipeline.ts). Items missing any of these are
-// skipped.
-const REQUIRED_BANDS = ["B03", "B04", "B08"] as const;
+// Bands the curated index set needs — all 10 m, so every normalized-difference
+// ratio built from them is seam-free: B02(blue), B03(green), B04(red), B08(NIR).
+// NDVI=B08/B04, NDWI=B03/B08, GNDVI=B08/B03, redness=B04/B02. B11/B12 (20 m SWIR)
+// stay out: pairing them with a 10 m band seams (see renderPipeline.ts). Items
+// missing any of these are skipped.
+const REQUIRED_BANDS = ["B02", "B03", "B04", "B08"] as const;
 
 type StacFeature = {
   id: string;
@@ -119,6 +120,7 @@ export async function fetchStacItems(opts: FetchOptions): Promise<FetchResult> {
         bbox: feat.bbox,
         assets: {
           visual: { href: visual.href },
+          B02: bandAssets.B02,
           B03: bandAssets.B03,
           B04: bandAssets.B04,
           B08: bandAssets.B08,

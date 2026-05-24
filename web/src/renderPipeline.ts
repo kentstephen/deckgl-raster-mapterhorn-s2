@@ -10,7 +10,7 @@ import { NormalizedDifference } from "./shaders/ndvi";
 import { ScaleColor } from "./shaders/scaleColor";
 
 /** Sentinel-2 band assets we pull per item (RGB uses the precomposed TCI). */
-export type BandKey = "B03" | "B04" | "B08";
+export type BandKey = "B02" | "B03" | "B04" | "B08";
 
 /**
  * Curated spectral-index registry (item 4). Every entry is a normalized
@@ -27,6 +27,10 @@ export type BandKey = "B03" | "B04" | "B08";
 export const INDICES = {
   ndvi: { label: "NDVI", a: "B08", b: "B04", desc: "vegetation" },
   ndwi: { label: "NDWI", a: "B03", b: "B08", desc: "water" },
+  gndvi: { label: "GNDVI", a: "B08", b: "B03", desc: "green vegetation" },
+  // Redness / iron-oxide: (red − blue)/(red + blue). Lights up red rock strata
+  // (e.g. canyon sandstone), tracing geology + landform. Both 10 m → seam-free.
+  redness: { label: "REDNESS", a: "B04", b: "B02", desc: "iron oxide / red rock" },
 } as const satisfies Record<string, { label: string; a: BandKey; b: BandKey; desc: string }>;
 
 export type IndexKey = keyof typeof INDICES;

@@ -39,7 +39,12 @@ import {
   type LogEntry,
 } from "./consoleCapture";
 import { resultToBbox, type GeoResult } from "./geocode";
-import { loadColorPrefs, saveColorPrefs } from "./prefs";
+import {
+  loadColorPrefs,
+  saveColorPrefs,
+  loadDefaultView,
+  saveDefaultView,
+} from "./prefs";
 import {
   appendCartoColormaps,
   buildColormapStripe,
@@ -94,10 +99,11 @@ function getCachedGeoTIFF(url: string): Promise<GeoTIFF> {
 // (filtered out by stac.ts CORS_OK_HOSTS).
 const AVAILABLE_YEARS = [2022, 2023, 2024] as const;
 const DEFAULT_YEAR = 2023;
-// Grand Canyon, AZ — South Rim across the canyon. Big, legible relief: the rim
-// stands ~1500 m above the Colorado River, easy to read while evaluating the
-// drape/terrain.
-const STAC_BBOX: [number, number, number, number] = [-112.5, 35.95, -111.8, 36.45];
+// Culebra / Sangre de Cristo Range, southern CO. Small extent (~7 × 5.5 km).
+// The default view can be overridden by the SET DEFAULT button (localStorage).
+const STAC_BBOX: [number, number, number, number] = [
+  -105.84860493530549, 37.18091158082192, -105.76837544400307, 37.23037834288358,
+];
 // Ceiling for the "fetch viewport" AOI span (deg/axis) so a zoomed-out view
 // can't enumerate thousands of COGs. Matches geocode.ts's maxSpanDeg.
 const MAX_VIEWPORT_SPAN_DEG = 5.0;
@@ -379,7 +385,10 @@ export default function App() {
   // small buffer so items overlapping the edges are included. Span is clamped
   // (MAX_VIEWPORT_SPAN_DEG) so a zoomed-out view can't fan out into thousands of
   // COG opens. Drives the same debounced /search as draw/geocode.
-  const handleFetchViewport = () => {
+  // `force` (the FETCH VIEW button) bypasses the inside-guard so it always
+  // re-runs the STAC search — a manual retry when a fetch came back empty.
+  // Auto-fetch on move passes force=false to avoid reloading on every nudge.
+  const handleFetchViewport = (force = false) => {
     const map = mapRef.current?.getMap();
     if (!map) return;
     const b = map.getBounds();
@@ -395,9 +404,14 @@ export default function App() {
     const dw = (e - w) * margin;
     const dh = (n - s) * margin;
     w -= dw; e += dw; s -= dh; n += dh;
-    // Clamp each axis span to the ceiling, keeping the viewport center.
-    const cx = (w + e) / 2;
-    const cy = (s + n) / 2;
+    // Anchor the clamp on the CAMERA center, not the bbox center. Under pitch,
+    // getBounds() returns a trapezoid skewed toward the far horizon, so its
+    // geometric center sits well past the camera — clamping there under-covers
+    // the near foreground (the bottom-of-frame gap). map.getCenter() keeps the
+    // clamped AOI on what you're actually looking at.
+    const c = map.getCenter();
+    const cx = c.lng;
+    const cy = c.lat;
     const maxHalf = MAX_VIEWPORT_SPAN_DEG / 2;
     const halfW = Math.min((e - w) / 2, maxHalf);
     const halfH = Math.min((n - s) / 2, maxHalf);
@@ -418,14 +432,31 @@ export default function App() {
       next[1] >= cur[1] - 1e-6 &&
       next[2] <= cur[2] + 1e-6 &&
       next[3] <= cur[3] + 1e-6;
-    if (inside) return;
+    if (inside && !force) return;
     setMarker(null);
-    setBbox(next);
+    // Force a fresh array even if value-identical so the STAC effect re-runs
+    // (its dep is the bbox reference) — that's the actual retry.
+    setBbox([next[0], next[1], next[2], next[3]]);
   };
 
   // Snap the map back to plan view: bearing → north, pitch → flat.
   const handleResetNorth = () => {
     mapRef.current?.getMap()?.easeTo({ bearing: 0, pitch: 0, duration: 400 });
+  };
+
+  // Persist the current camera as the default "home" view — next reload lands
+  // here (loadDefaultView seeds initialViewState).
+  const handleSetDefaultView = () => {
+    const map = mapRef.current?.getMap();
+    if (!map) return;
+    const c = map.getCenter();
+    saveDefaultView({
+      longitude: c.lng,
+      latitude: c.lat,
+      zoom: map.getZoom(),
+      pitch: map.getPitch(),
+      bearing: map.getBearing(),
+    });
   };
 
   const handlePickPlace = (r: GeoResult) => {
@@ -568,17 +599,20 @@ export default function App() {
     return [...base, mosaic];
   }, [stacItems, labelBeforeId, mode, gen, colormapTexture, colormapIndexMap, rgbGain, smoothing, terrainActive, terrainLayer, terrainExtension, ndviColormap, ndviRange, ndviScale, ndviReversed]);
 
-  const initialViewState = {
-    // Grand Canyon South Rim (Mather Point area), looking north across the canyon.
-    longitude: -112.11,
-    latitude: 36.03,
-    zoom: 12, // wider than z13 so Sentinel-2 isn't over-zoomed; terrain on at z12
-    // Tilt back so distant terrain fills toward the top of the screen, but keep
-    // the top just BELOW the horizon (no sky/void) — the standard deck.gl 3D
-    // look. maxPitch is capped to 60 so the camera can't look above the terrain.
-    pitch: 56,
-    bearing: 0,
-  };
+  // A user-saved "home" view (SET DEFAULT button) wins; else the San Juans
+  // default. Read once at mount via useRef so re-renders don't reset the camera.
+  const initialViewState = useRef(
+    loadDefaultView() ?? {
+      // Culebra / Sangre de Cristo Range, southern CO — centered on STAC_BBOX.
+      longitude: -105.8085,
+      latitude: 37.2056,
+      zoom: 13, // small AOI — zoom in so it fills the frame and pulls 10 m terrain
+      // Tilt back so distant terrain fills toward the top of the screen, but keep
+      // the top just BELOW the horizon (no sky/void). maxPitch is capped to 60.
+      pitch: 56,
+      bearing: 0,
+    },
+  ).current;
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%" }}>
@@ -676,8 +710,9 @@ export default function App() {
         onToggleMarker={() => setShowMarker((v) => !v)}
         drawing={drawing}
         onToggleDraw={() => setDrawing((v) => !v)}
-        onFetchViewport={handleFetchViewport}
+        onFetchViewport={() => handleFetchViewport(true)}
         onResetNorth={handleResetNorth}
+        onSetDefaultView={handleSetDefaultView}
         zoom={zoom}
         smoothing={smoothing}
         onSmoothingChange={setSmoothing}
@@ -861,6 +896,7 @@ function InfoPanel({
   onToggleDraw,
   onFetchViewport,
   onResetNorth,
+  onSetDefaultView,
   zoom,
   smoothing,
   onSmoothingChange,
@@ -900,6 +936,7 @@ function InfoPanel({
   onToggleDraw: () => void;
   onFetchViewport: () => void;
   onResetNorth: () => void;
+  onSetDefaultView: () => void;
   zoom: number;
   smoothing: boolean;
   onSmoothingChange: (v: boolean) => void;
@@ -1067,6 +1104,13 @@ function InfoPanel({
           >
             NORTH ↑
           </Toggle>
+          <Toggle
+            active={false}
+            onClick={onSetDefaultView}
+            title="Save the current camera (center, zoom, pitch, bearing) as the default view on reload"
+          >
+            SET DEFAULT
+          </Toggle>
           {hasMarker && (
             <Toggle active={showMarker} onClick={onToggleMarker}>
               {showMarker ? "HIDE MARKER" : "SHOW MARKER"}
@@ -1155,66 +1199,6 @@ function InfoPanel({
                 </span>
               </div>
 
-              {/* Terrain: drape the imagery over the Mapterhorn USGS 3DEP DEM. */}
-              <div
-                style={{
-                  marginTop: 14,
-                  borderTop: "1px solid rgba(255,255,255,0.08)",
-                  paddingTop: 10,
-                }}
-              >
-                <div
-                  style={{
-                    ...eyebrowStyle,
-                    color: UI.accent,
-                    letterSpacing: "0.1em",
-                    marginBottom: 6,
-                  }}
-                >
-                  terrain · USGS 3DEP 10 m
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                  <Toggle
-                    active={terrainEnabled}
-                    onClick={() => onTerrainEnabledChange(!terrainEnabled)}
-                    title="Toggle between flat imagery and 3D terrain (Mapterhorn USGS 3DEP 10 m, z13+)."
-                  >
-                    {terrainEnabled ? "GO FLAT" : "GO 3D"}
-                  </Toggle>
-                  <span style={{ fontFamily: UI.mono, fontSize: 10.5, color: UI.faint }}>
-                    {!terrainEnabled
-                      ? "currently flat"
-                      : terrainActive
-                        ? "3D · 10 m relief"
-                        : "3D · zoom in past z13"}
-                  </span>
-                </div>
-                {terrainEnabled && (
-                  <>
-                    <Slider
-                      label="exaggeration"
-                      value={exaggeration}
-                      min={0}
-                      max={3}
-                      onChange={onExaggerationChange}
-                      onReset={() => onExaggerationChange(1)}
-                    />
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        fontFamily: UI.mono,
-                        fontSize: 11,
-                        color: UI.faint,
-                        marginTop: 2,
-                      }}
-                    >
-                      <span>flat</span>
-                      <span>{exaggeration.toFixed(1)}×</span>
-                    </div>
-                  </>
-                )}
-              </div>
             </>
           )}
 
@@ -1309,6 +1293,68 @@ function InfoPanel({
               <ColormapBar name={ndviColormap} reversed={ndviReversed} />
             </>
           )}
+
+          {/* Terrain controls — shown in BOTH RGB and spectral-index modes
+              (drape is wired for both), so switching to an index never loses 3D. */}
+          <div
+            style={{
+              marginTop: 14,
+              borderTop: "1px solid rgba(255,255,255,0.08)",
+              paddingTop: 10,
+            }}
+          >
+            <div
+              style={{
+                ...eyebrowStyle,
+                color: UI.accent,
+                letterSpacing: "0.1em",
+                marginBottom: 6,
+              }}
+            >
+              terrain · USGS 3DEP 10 m
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <Toggle
+                active={terrainEnabled}
+                onClick={() => onTerrainEnabledChange(!terrainEnabled)}
+                title="Toggle between flat imagery and 3D terrain (Mapterhorn USGS 3DEP 10 m, z13+)."
+              >
+                {terrainEnabled ? "GO FLAT" : "GO 3D"}
+              </Toggle>
+              <span style={{ fontFamily: UI.mono, fontSize: 10.5, color: UI.faint }}>
+                {!terrainEnabled
+                  ? "currently flat"
+                  : terrainActive
+                    ? "3D · 10 m relief"
+                    : "3D · zoom in past z13"}
+              </span>
+            </div>
+            {terrainEnabled && (
+              <>
+                <Slider
+                  label="exaggeration"
+                  value={exaggeration}
+                  min={0}
+                  max={3}
+                  onChange={onExaggerationChange}
+                  onReset={() => onExaggerationChange(1)}
+                />
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    fontFamily: UI.mono,
+                    fontSize: 11,
+                    color: UI.faint,
+                    marginTop: 2,
+                  }}
+                >
+                  <span>flat</span>
+                  <span>{exaggeration.toFixed(1)}×</span>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </Section>
 
