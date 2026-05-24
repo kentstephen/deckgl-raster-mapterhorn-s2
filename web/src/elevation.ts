@@ -16,11 +16,12 @@ const TILE_URL = (z: number, x: number, y: number) =>
 const DEM_TILE_SIZE = 512;
 
 /**
- * Map zoom at/above which terrain renders. Decoupled from the DEM tile zoom:
- * Sentinel-2 looks washed-out when the map is zoomed in tight (z13+), so we let
- * the camera sit a bit wider (z12) while still pulling 10 m DEM tiles (z>=13).
+ * Map zoom at/above which terrain renders. Set to 10 so you can pull back and
+ * look DOWN at Mount Washington from a distance (not just from on top of it).
+ * The DEM tile zoom (below) tracks the view, so zooming out doesn't explode the
+ * tile count.
  */
-export const TERRAIN_MIN_ZOOM = 12;
+export const TERRAIN_MIN_ZOOM = 10;
 /** Mapterhorn serves usgs3dep13 (10 m) only at z>=13; below that it's glo30. */
 export const DEM_MIN_ZOOM = 13;
 /** 10 m detail saturates by ~z15; capping bounds tile counts and decode cost. */
@@ -47,14 +48,19 @@ export function terrainActiveAtZoom(mapZoom: number): boolean {
 const EARTH_RADIUS_M = 6378137;
 const WEB_MERCATOR_MAX = Math.PI * EARTH_RADIUS_M; // 20037508.342789244
 
-/** Pick the DEM tile zoom for a given map zoom (clamped to the 10 m band). */
+/**
+ * Pick the DEM tile zoom for a given map zoom.
+ * - Close in (map z>=12): pin to the 10 m band (z13–15) for full detail.
+ * - Zoomed out (map z<12): let DEM zoom track the view (z10–12, Mapterhorn's
+ *   coarser glo30), so a wide "look down" view doesn't pull thousands of z13
+ *   tiles. You can't see 10 m detail from that far anyway.
+ */
 export function demZoomForMapZoom(mapZoom: number): number {
-  // Always pull >=z13 DEM tiles (the 10 m band) even when the camera is wider,
-  // so terrain stays detailed at map zoom 12.
-  return Math.max(
-    DEM_MIN_ZOOM,
-    Math.min(TERRAIN_MAX_DEM_ZOOM, Math.round(mapZoom)),
-  );
+  const z = Math.round(mapZoom);
+  if (mapZoom >= 12) {
+    return Math.max(DEM_MIN_ZOOM, Math.min(TERRAIN_MAX_DEM_ZOOM, z));
+  }
+  return Math.max(TERRAIN_MIN_ZOOM, Math.min(12, z));
 }
 
 // ---- coordinate helpers -----------------------------------------------------

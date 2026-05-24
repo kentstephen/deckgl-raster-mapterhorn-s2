@@ -507,7 +507,10 @@ export default function App() {
     longitude: -71.3033,
     latitude: 44.2706,
     zoom: 12, // wider than z13 so Sentinel-2 isn't over-zoomed; terrain on at z12
-    pitch: 70, // lie the camera back so the horizon comes into view
+    // Tilt back so distant terrain fills toward the top of the screen, but keep
+    // the top just BELOW the horizon (no sky/void) — the standard deck.gl 3D
+    // look. maxPitch is capped to 60 so the camera can't look above the terrain.
+    pitch: 56,
     bearing: 0,
   };
 
@@ -517,7 +520,7 @@ export default function App() {
         ref={mapRef}
         initialViewState={initialViewState}
         minZoom={3}
-        maxPitch={85}
+        maxPitch={60}
         onMove={(e) => setZoom(e.viewState.zoom)}
         // attributionControl={false}  // comment out to re-enable the (i) badge bottom-right
         attributionControl={false}
@@ -527,20 +530,6 @@ export default function App() {
           const ls = map.getStyle()?.layers ?? [];
           const firstSymbol = ls.find((l: any) => l.type === "symbol");
           setLabelBeforeId(firstSymbol?.id);
-          // Subtle sky/atmosphere so the high-pitch background reads as a horizon
-          // instead of a black void.
-          try {
-            (map as any).setSky?.({
-              "sky-color": "#9bb8d8",
-              "sky-horizon-blend": 0.6,
-              "horizon-color": "#dfeaf5",
-              "horizon-fog-blend": 0.6,
-              "fog-color": "#e8eef5",
-              "fog-ground-blend": 0.7,
-            });
-          } catch {
-            /* older maplibre without setSky — ignore */
-          }
           // Re-derive the label insertion point whenever the style reloads
           // (e.g. toggling the labels basemap) so imagery stays under labels.
           map.on("styledata", () => {
