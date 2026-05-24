@@ -124,7 +124,10 @@ async function fetchTerrainTile(
         const g = data[i * 4 + 1];
         const b = data[i * 4 + 2];
         // terrarium decode
-        elev[i] = r * 256 + g + b / 256 - 32768;
+        const e = r * 256 + g + b / 256 - 32768;
+        // Reject no-data / sentinel / absurd values (ocean fill, tile seams,
+        // terrarium -32768) so they can't spike into needles when exaggerated.
+        elev[i] = e < -500 || e > 9000 ? 0 : e;
       }
       cache.set(k, elev);
       notifyTileLoaded();

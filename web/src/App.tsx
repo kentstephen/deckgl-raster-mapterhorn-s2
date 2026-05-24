@@ -181,7 +181,7 @@ export default function App() {
   // Terrain controls. `terrainEnabled=false` = flat (no DEM lift). Exaggeration
   // multiplies real elevation in the mesh (1 = true scale).
   const [terrainEnabled, setTerrainEnabled] = useState<boolean>(true);
-  const [exaggeration, setExaggeration] = useState<number>(1.5);
+  const [exaggeration, setExaggeration] = useState<number>(1);
   // Bumped (throttled) whenever a DEM tile finishes decoding, so the elevated
   // layers re-render and rebuild their mesh against the now-warm cache. (The
   // layer can't self-rebuild from its async fetch — see ElevatedRasterLayer.)
@@ -194,7 +194,7 @@ export default function App() {
       setTimeout(() => {
         scheduled = false;
         setDemVersion((v) => v + 1);
-      }, 150);
+      }, 800);
     });
   }, []);
   // DEM tile zoom, derived from the map zoom and clamped to the 10 m band
@@ -507,7 +507,7 @@ export default function App() {
     longitude: -71.3033,
     latitude: 44.2706,
     zoom: 12, // wider than z13 so Sentinel-2 isn't over-zoomed; terrain on at z12
-    pitch: 55, // terrain viewer opens pitched so 3D relief is visible on load
+    pitch: 70, // lie the camera back so the horizon comes into view
     bearing: 0,
   };
 
@@ -517,6 +517,7 @@ export default function App() {
         ref={mapRef}
         initialViewState={initialViewState}
         minZoom={3}
+        maxPitch={85}
         onMove={(e) => setZoom(e.viewState.zoom)}
         // attributionControl={false}  // comment out to re-enable the (i) badge bottom-right
         attributionControl={false}
@@ -526,6 +527,20 @@ export default function App() {
           const ls = map.getStyle()?.layers ?? [];
           const firstSymbol = ls.find((l: any) => l.type === "symbol");
           setLabelBeforeId(firstSymbol?.id);
+          // Subtle sky/atmosphere so the high-pitch background reads as a horizon
+          // instead of a black void.
+          try {
+            (map as any).setSky?.({
+              "sky-color": "#9bb8d8",
+              "sky-horizon-blend": 0.6,
+              "horizon-color": "#dfeaf5",
+              "horizon-fog-blend": 0.6,
+              "fog-color": "#e8eef5",
+              "fog-ground-blend": 0.7,
+            });
+          } catch {
+            /* older maplibre without setSky — ignore */
+          }
           // Re-derive the label insertion point whenever the style reloads
           // (e.g. toggling the labels basemap) so imagery stays under labels.
           map.on("styledata", () => {
@@ -1087,16 +1102,16 @@ function InfoPanel({
                   <Toggle
                     active={terrainEnabled}
                     onClick={() => onTerrainEnabledChange(!terrainEnabled)}
-                    title="Drape imagery over the Mapterhorn USGS 3DEP 10 m DEM (z13+). Off = flat."
+                    title="Toggle between flat imagery and 3D terrain (Mapterhorn USGS 3DEP 10 m, z13+)."
                   >
-                    {terrainEnabled ? "3D ON" : "FLAT"}
+                    {terrainEnabled ? "GO FLAT" : "GO 3D"}
                   </Toggle>
                   <span style={{ fontFamily: UI.mono, fontSize: 10.5, color: UI.faint }}>
                     {!terrainEnabled
-                      ? "no relief"
+                      ? "currently flat"
                       : terrainActive
-                        ? "10 m relief"
-                        : "zoom in past z13"}
+                        ? "3D · 10 m relief"
+                        : "3D · zoom in past z13"}
                   </span>
                 </div>
                 {terrainEnabled && (
@@ -1107,7 +1122,7 @@ function InfoPanel({
                       min={0}
                       max={3}
                       onChange={onExaggerationChange}
-                      onReset={() => onExaggerationChange(1.5)}
+                      onReset={() => onExaggerationChange(1)}
                     />
                     <div
                       style={{

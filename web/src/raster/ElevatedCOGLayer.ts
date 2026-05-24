@@ -1,19 +1,22 @@
 import { COGLayer } from "@developmentseed/deck.gl-geotiff";
-import { RasterLayer } from "@developmentseed/deck.gl-raster";
 import { ElevatedRasterLayer } from "./ElevatedRasterLayer";
+
+// Mirrors @developmentseed/deck.gl-raster raster-tile-layer/constants.ts
+// (not public exports).
+const TILE_SIZE = 512;
+const WEB_MERCATOR_TO_WORLD_SCALE = TILE_SIZE / 40075016.686;
 
 /**
  * `COGLayer` whose per-tile imagery mesh is elevated by the DEM.
  *
  * `RasterTileLayer._renderSubLayers` (inherited by COGLayer) hardcodes
- * `new RasterLayer(...)` with no class hook. Rather than copy that ~60-line
- * method, we let it run, then swap the produced `RasterLayer` for an
- * `ElevatedRasterLayer` built from the same props — reusing all of upstream's
- * reprojection / modelMatrix / coordinate-system setup.
+ * `new RasterLayer(...)`. We override it with a faithful copy of that method,
+ * changing only the layer class (→ `ElevatedRasterLayer`) and threading the
+ * terrain props. Crucially the sublayer is still created via
+ * `this.getSubLayerProps(...)` so deck's CompositeLayer reconciliation /
+ * finalization works (an earlier `new ElevatedRasterLayer({...l.props})` remap
+ * bypassed that and broke mesh re-uploads on every change after the first).
  */
-// COGLayer types `_renderSubLayers` as private, so subclassing through the
-// typed class trips TS2415. Loosen to `any` (consistent with the rest of the
-// layer wiring) — the runtime class is unchanged.
 export class ElevatedCOGLayer extends (COGLayer as any) {
   static layerName = "ElevatedCOGLayer";
   static defaultProps = {
@@ -25,18 +28,61 @@ export class ElevatedCOGLayer extends (COGLayer as any) {
   };
 
   _renderSubLayers(props: any, descriptor: any, renderTile: any) {
-    const layers = super._renderSubLayers(props, descriptor, renderTile);
+    const { maxError } = this.props as any;
     const { exaggeration, demZoom, terrainEnabled, demVersion } = this.props as any;
-    return (layers || []).map((l: any) =>
-      l instanceof RasterLayer && !(l instanceof ElevatedRasterLayer)
-        ? new ElevatedRasterLayer({
-            ...l.props,
-            exaggeration,
-            demZoom,
-            terrainEnabled,
-            demVersion,
-          } as any)
-        : l,
+    if (!props.data) return [];
+
+    const tile = props.tile;
+    const { forwardTransform, inverseTransform } = tile;
+    const tileResult = renderTile(props.data);
+    if (!tileResult) return [];
+    const { image, renderPipeline } = tileResult;
+    const { width, height } = props.data;
+
+    const isGlobe = (this.context as any).viewport.resolution !== undefined;
+    const reprojectionFns = isGlobe
+      ? {
+          forwardTransform,
+          inverseTransform,
+          forwardReproject: descriptor.projectTo4326,
+          inverseReproject: descriptor.projectFrom4326,
+        }
+      : {
+          forwardTransform,
+          inverseTransform,
+          forwardReproject: descriptor.projectTo3857,
+          inverseReproject: descriptor.projectFrom3857,
+        };
+    const deckProjectionProps = isGlobe
+      ? {}
+      : {
+          coordinateSystem: "cartesian",
+          coordinateOrigin: [TILE_SIZE / 2, TILE_SIZE / 2, 0],
+          modelMatrix: [
+            WEB_MERCATOR_TO_WORLD_SCALE, 0, 0, 0,
+            0, WEB_MERCATOR_TO_WORLD_SCALE, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+          ],
+        };
+
+    const rasterLayer = new ElevatedRasterLayer(
+      this.getSubLayerProps({
+        id: `${props.id}-raster`,
+        width,
+        height,
+        ...(image !== undefined && { image }),
+        renderPipeline,
+        maxError,
+        reprojectionFns,
+        // terrain
+        exaggeration,
+        demZoom,
+        terrainEnabled,
+        demVersion,
+        ...deckProjectionProps,
+      }) as any,
     );
+    return [rasterLayer];
   }
 }

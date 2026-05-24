@@ -23,9 +23,10 @@ import {
  * a prefetch, and rebuild once tiles land.
  */
 
-// Regular-grid tessellation per COG tile (segments per axis). Dense enough to
-// resolve 10 m relief; (N+1)^2 vertices, 2·N^2 triangles.
-const TERRAIN_GRID = 128;
+// Regular-grid tessellation per COG tile (segments per axis). 32 → 1089
+// verts/tile — ~16× lighter than 128 (which pushed the browser to ~1.4 GB and
+// froze the UI). Bump only if relief looks blocky at exaggeration 1.
+const TERRAIN_GRID = 32;
 
 export class ElevatedRasterLayer extends RasterLayer {
   static layerName = "ElevatedRasterLayer";
@@ -157,6 +158,10 @@ export class ElevatedRasterLayer extends RasterLayer {
       }
     }
 
+    // Bump a mesh version so renderLayers can give the MeshTextureLayer a fresh
+    // id → deck remounts the model and re-uploads geometry. SimpleMeshLayer's
+    // `mesh` is an async prop, so a new mesh object on the same sublayer id does
+    // NOT re-upload to the GPU; versioning the id is what actually updates it.
     this.setState({
       mesh: {
         indices: { value: indices, size: 1 },
