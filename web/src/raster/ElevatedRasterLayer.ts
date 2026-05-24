@@ -23,10 +23,12 @@ import {
  * a prefetch, and rebuild once tiles land.
  */
 
-// Regular-grid tessellation per COG tile (segments per axis). 32 → 1089
-// verts/tile — ~16× lighter than 128 (which pushed the browser to ~1.4 GB and
-// froze the UI). Bump only if relief looks blocky at exaggeration 1.
-const TERRAIN_GRID = 32;
+// Regular-grid tessellation per COG tile (segments per axis). 64 → 4225
+// verts/tile. 128 looked smooth but hit ~1.4 GB / froze — though most of that was
+// a layer leak (now fixed via getSubLayerProps), so 64 should be safe and far
+// less blocky than 32. Detail also sharpens as you zoom in (tiles get smaller).
+// TODO: tie grid to DEM resolution for true 10 m if 64 still reads coarse.
+const TERRAIN_GRID = 64;
 
 export class ElevatedRasterLayer extends RasterLayer {
   static layerName = "ElevatedRasterLayer";

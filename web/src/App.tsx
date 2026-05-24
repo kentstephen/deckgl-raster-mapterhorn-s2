@@ -90,7 +90,7 @@ const DEFAULT_YEAR = 2023;
 const STAC_BBOX: [number, number, number, number] = [-111.0, 43.5, -110.5, 44.0];
 // Ceiling for the "fetch viewport" AOI span (deg/axis) so a zoomed-out view
 // can't enumerate thousands of COGs. Matches geocode.ts's maxSpanDeg.
-const MAX_VIEWPORT_SPAN_DEG = 3.0;
+const MAX_VIEWPORT_SPAN_DEG = 5.0;
 
 // Items are ANNUAL composites (`YYYY-01-01_YYYY+1-01-01`). A full-year query
 // also matches the adjacent years' annuals at the Jan-1 boundary, so a tile can
@@ -523,6 +523,12 @@ export default function App() {
         minZoom={3}
         maxPitch={60}
         onMove={(e) => setZoom(e.viewState.zoom)}
+        // Auto-fetch imagery for wherever you pan/zoom so frame edges fill in
+        // (was manual via FETCH VIEW). Skipped while drawing an AOI. The STAC
+        // search is debounced downstream, so per-gesture moveend is fine.
+        onMoveEnd={(e) => {
+          if (!drawing && e.originalEvent) handleFetchViewport();
+        }}
         // attributionControl={false}  // comment out to re-enable the (i) badge bottom-right
         attributionControl={false}
         mapStyle={mapStyle}

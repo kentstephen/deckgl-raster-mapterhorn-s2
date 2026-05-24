@@ -57,7 +57,9 @@ const WEB_MERCATOR_MAX = Math.PI * EARTH_RADIUS_M; // 20037508.342789244
  */
 export function demZoomForMapZoom(mapZoom: number): number {
   const z = Math.round(mapZoom);
-  if (mapZoom >= 12) {
+  // 10 m (usgs3dep13, z13+) from map zoom ~11.5 up; coarser glo30 only when
+  // pulled well back. (Threshold 11 so a z11.7 "look down" view is still 10 m.)
+  if (mapZoom >= 11) {
     return Math.max(DEM_MIN_ZOOM, Math.min(TERRAIN_MAX_DEM_ZOOM, z));
   }
   return Math.max(TERRAIN_MIN_ZOOM, Math.min(12, z));
