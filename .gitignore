@@ -24,3 +24,7 @@ reference-sentinel-2-cog-deckgl-raster/
 
 # Local settings
 .claude/settings.local.json
+
+# Throwaway dev/screenshot scripts (Brave headless harness)
+web/spike-shot.mjs
+web/interact-test.mjs
