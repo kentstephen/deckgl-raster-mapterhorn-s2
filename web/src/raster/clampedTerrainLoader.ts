@@ -42,10 +42,9 @@ const MIN_ELEV_M = -500;
 const MAX_ELEV_M = 9000;
 
 // Neighbor-relative despeckle threshold (REAL meters). A pixel whose elevation
-// differs from the window median by more than this is treated as a spike and
-// replaced by the median. Tune from the ?demdebug histogram; 300 m is a
-// conservative start (real terrain rarely jumps >300 m across one 10 m pixel —
-// that's a >88% slope).
+// differs from the window median by more than this is replaced by the median.
+// ~120 m over a ~48 m (5×5 @ 10 m) window is a >68° slope — steeper than almost
+// all real terrain, so real relief survives while needles/ringing get cleaned.
 const DESPECKLE_T = 120;
 
 // Number of median-replace passes. Iterating dissolves clustered spikes (lossy-
@@ -58,14 +57,6 @@ const DESPECKLE_PASSES = 3;
 // of spikes and at tile edges (few valid neighbors). r=2 tolerates up to ~12 bad
 // samples, so it survives small clusters. Heavier per pixel; revisit if jank.
 const DESPECKLE_R = 2;
-
-// `?demdebug` logs per-tile elevation stats + outlier histograms for the first
-// few tiles, so the threshold can be set from real numbers. Off by default.
-const DEBUG =
-  typeof location !== "undefined" &&
-  new URLSearchParams(location.search).has("demdebug");
-const DEBUG_TILE_LIMIT = 4;
-let debugTilesLogged = 0;
 
 type ElevationDecoder = {
   rScaler: number;
@@ -138,7 +129,6 @@ function getTerrainClamped(
     raw[i] = e < minE || e > maxE ? NaN : e;
   }
 
-  if (DEBUG && debugTilesLogged < DEBUG_TILE_LIMIT) logTileStats(raw, imageData, width, height, k);
 
   // 2. Despeckle: repeated passes of conditional median-replace. A single pass
   //    can't fix CLUSTERS of bad pixels (lossy-WebP ringing along ridge edges)
@@ -191,66 +181,6 @@ function getTerrainClamped(
     terrain[i] = terrain[i - 1];
   }
   return terrain;
-}
-
-// Diagnostics for ?demdebug: min/max/median, spike histogram vs the 3×3 median,
-// and how many spikes coincide with alpha=0 / RGB=(0,0,0) (nodata signatures).
-function logTileStats(
-  raw: Float32Array,
-  imageData: Uint8ClampedArray,
-  width: number,
-  height: number,
-  k: number,
-) {
-  debugTilesLogged++;
-  const valid: number[] = [];
-  for (let i = 0; i < raw.length; i++) if (!Number.isNaN(raw[i])) valid.push(raw[i] / k);
-  valid.sort((a, b) => a - b);
-  const med = valid.length ? valid[valid.length >> 1] : 0;
-  const buckets = [500, 1000, 2000];
-  const counts = [0, 0, 0];
-  let onAlpha0 = 0;
-  let onBlack = 0;
-  let outOfBand = 0;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = y * width + x;
-      const v = raw[idx];
-      const c = idx * 4;
-      const a = imageData[c + 3];
-      const isBlack = imageData[c] === 0 && imageData[c + 1] === 0 && imageData[c + 2] === 0;
-      if (Number.isNaN(v)) {
-        outOfBand++;
-        if (a === 0) onAlpha0++;
-        if (isBlack) onBlack++;
-        continue;
-      }
-      // Local median (real meters) — reuse a quick 3×3 scan.
-      const nb: number[] = [];
-      for (let dy = -1; dy <= 1; dy++)
-        for (let dx = -1; dx <= 1; dx++) {
-          const yy = y + dy, xx = x + dx;
-          if (yy < 0 || yy >= height || xx < 0 || xx >= width) continue;
-          const nv = raw[yy * width + xx];
-          if (!Number.isNaN(nv)) nb.push(nv / k);
-        }
-      nb.sort((p, q) => p - q);
-      const m = nb[nb.length >> 1];
-      const d = Math.abs(v / k - m);
-      for (let b = 0; b < buckets.length; b++) if (d > buckets[b]) counts[b]++;
-      if (d > buckets[0]) {
-        if (a === 0) onAlpha0++;
-        if (isBlack) onBlack++;
-      }
-    }
-  }
-  console.info(
-    `[demdebug] tile ${debugTilesLogged}/${DEBUG_TILE_LIMIT} ${width}×${height} ` +
-      `min=${valid[0]?.toFixed(0)} max=${valid[valid.length - 1]?.toFixed(0)} median=${med.toFixed(0)} m | ` +
-      `spikes |Δmed|> ${buckets.join("/")} m = ${counts.join("/")} | ` +
-      `outOfBand=${outOfBand} | on alpha=0: ${onAlpha0}, on RGB=000: ${onBlack} | ` +
-      `T=${DESPECKLE_T} m`,
-  );
 }
 
 function getMeshAttributes(
@@ -384,17 +314,7 @@ function addSkirt(
   return { attributes, triangles: concatU32(triangles, newTriangles) };
 }
 
-// One-shot proof-of-life: confirms deck actually routes terrain tiles through
-// THIS loader (plan H0) rather than the stock TerrainWorkerLoader. Fires once,
-// regardless of ?demdebug. If you never see it, the loader is dead code and no
-// amount of despeckling matters — the wiring is the bug.
-let provedAlive = false;
-
 async function parse(arrayBuffer: ArrayBuffer, options: any) {
-  if (!provedAlive) {
-    provedAlive = true;
-    console.warn("[ClampedTerrainLoader] parse() RAN — loader is wired in ✅");
-  }
   const t: TerrainOptions = options?.terrain ?? options;
   const { data, width, height } = await decodeImage(arrayBuffer);
   const terrain = getTerrainClamped(data, width, height, t.elevationDecoder);

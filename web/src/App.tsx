@@ -53,6 +53,7 @@ import {
 import { PlaceSearch } from "./PlaceSearch";
 import { loadGeoTIFF } from "./loadGeotiff";
 import { getTileData, type S2TileData } from "./getTileData";
+import { sampleMinElevation } from "./sampleElevation";
 import { renderTile } from "./renderTile";
 import {
   bandSlotsFor,
@@ -197,6 +198,18 @@ export default function App() {
   // multiplies real elevation in the mesh (1 = true scale).
   const [terrainEnabled, setTerrainEnabled] = useState<boolean>(true);
   const [exaggeration, setExaggeration] = useState<number>(1);
+  // "Ground level": subtract the in-view base elevation from the terrain so high-
+  // altitude terrain sits near z=0 (manageable camera/zoom + less extruded-tile
+  // culling at frame edges). terrainBaseM is the subtracted base (real meters),
+  // quantized to a band so panning within it doesn't reload the terrain.
+  const [groundLevel, setGroundLevel] = useState<boolean>(true);
+  const [terrainBaseM, setTerrainBaseM] = useState<number>(0);
+  // PAUSE freezes the move-driven auto-behaviors (imagery fetch + ground re-
+  // leveling) so you can pan/tilt freely without the map reloading under you.
+  const [paused, setPaused] = useState<boolean>(false);
+  // Base granularity unit; the actual quantum scales with zoom (computed in
+  // updateGroundBase) so a tight view re-levels finely and a wide view coarsely.
+  const GROUND_QUANTUM_BASE_M = 125;
   // Terrain is now handled by deck's own TerrainLayer (DEM tiling + terrarium
   // decode on workers + LOD/overzoom) and TerrainExtension (drapes the S2
   // imagery onto that surface). No hand-rolled mesh, no main-thread decode, no
@@ -222,7 +235,9 @@ export default function App() {
         rScaler: 256 * k,
         gScaler: 1 * k,
         bScaler: (1 / 256) * k,
-        offset: -32768 * k,
+        // Subtract the ground-level base (real meters) so high terrain sits near
+        // z=0. Decoded z = (realMeters − base) × k. base=0 → true elevation.
+        offset: (-32768 - terrainBaseM) * k,
       },
       // The terrain surface: 'terrain+draw' provides the mesh that imagery drapes
       // onto AND draws a dark fill (color below) where no COG covers. Imagery is
@@ -245,7 +260,7 @@ export default function App() {
       loaders: [ClampedTerrainLoader],
       beforeId: labelBeforeId,
     } as any);
-  }, [terrainActive, exaggeration, labelBeforeId]);
+  }, [terrainActive, exaggeration, terrainBaseM, labelBeforeId]);
 
   // Mirror the module-level load scoreboard into React state.
   useEffect(() => subscribeStats(setStats), []);
@@ -340,9 +355,15 @@ export default function App() {
 
   useEffect(() => {
     const ac = new AbortController();
-    // Do NOT clear stacItems here — keep the current imagery on screen until the
-    // new results arrive, so a refetch (AOI/year change) swaps in place instead
-    // of blinking to empty first. setStacItems(items) below replaces it.
+    // Clear stacItems on AOI/year change. This isn't just cosmetic: the
+    // MosaicLayer's spatial index (Flatbush) is rebuilt from `sources`, and
+    // deck.gl-geotiff's getTileIndices does `sources[i]` UNGUARDED. If a new,
+    // shorter source list arrives while the old (longer) index is still live,
+    // `sources[i]` is undefined → "Cannot read properties of undefined (id)"
+    // crash-spam. Routing through [] resets the index to null and avoids the
+    // mismatch. (Brief blink on a real AOI/year change — infrequent given the
+    // 50% fetch buffer; correctness > the no-blink nicety.)
+    setStacItems([]);
     setStacError(null);
     // Debounce: rapid bbox changes (draw-tool drags, repeated searches) would
     // otherwise kick off overlapping /search paginations against the public
@@ -443,6 +464,66 @@ export default function App() {
   const handleResetNorth = () => {
     mapRef.current?.getMap()?.easeTo({ bearing: 0, pitch: 0, duration: 400 });
   };
+
+  // Reset the map to the default view (saved home view, else the hardcoded one).
+  const handleResetView = () => {
+    mapRef.current?.getMap()?.easeTo({
+      center: [initialViewState.longitude, initialViewState.latitude],
+      zoom: initialViewState.zoom,
+      pitch: initialViewState.pitch,
+      bearing: initialViewState.bearing,
+      duration: 600,
+    });
+  };
+
+  // Sample the in-view ground elevation and set the (quantized) terrain base so
+  // high terrain sits near z=0. Samples on-screen points (unproject is robust
+  // under pitch), weighted toward the lower/near half of the frame — that's the
+  // foreground base we want to drop. Quantized so panning within a band doesn't
+  // reload the terrain; only crossing into much higher/lower terrain reloads.
+  const updateGroundBase = async () => {
+    const map = mapRef.current?.getMap();
+    if (!map) return;
+    // Sample a grid across the WHOLE viewport — near foreground AND the far band
+    // up toward the horizon — so the datum reflects the lowest point anywhere in
+    // view (maxPitch≤60 means no sky, so every pixel hits ground → unproject is
+    // valid everywhere). Far tiles are cached + this only runs on moveEnd.
+    const cv = map.getCanvas();
+    const W = cv.clientWidth;
+    const H = cv.clientHeight;
+    const cols = [0.12, 0.38, 0.62, 0.88];
+    const rows = [0.18, 0.38, 0.58, 0.78, 0.92]; // 0.18 = near the horizon
+    const points: [number, number][] = [];
+    for (const ry of rows) {
+      for (const cx of cols) {
+        const ll = map.unproject([W * cx, H * ry]);
+        points.push([ll.lng, ll.lat]);
+      }
+    }
+    const min = await sampleMinElevation(points);
+    if (min === null) return;
+    // Quantum scales with zoom: ~125 m at z13+, doubling each zoom out (z12≈250,
+    // z11≈500, z9≈2000), clamped [100, 2000]. Tight views re-level precisely;
+    // wide views (big elevation spread) stay coarse so they don't reload often.
+    const quantum = Math.min(
+      2000,
+      Math.max(100, GROUND_QUANTUM_BASE_M * 2 ** (13 - map.getZoom())),
+    );
+    // Hysteresis: keep the current base unless the sampled min has drifted more
+    // than a full quantum away — otherwise samples straddling a band edge flip
+    // the base back and forth and reload the terrain. ROUND (not floor) on move.
+    setTerrainBaseM((prev) => {
+      if (Math.abs(min - prev) <= quantum) return prev;
+      return Math.round(min / quantum) * quantum;
+    });
+  };
+
+  // Toggling ground-level on samples immediately; off resets the base to true 0.
+  useEffect(() => {
+    if (groundLevel) updateGroundBase();
+    else setTerrainBaseM(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groundLevel]);
 
   // Persist the current camera as the default "home" view — next reload lands
   // here (loadDefaultView seeds initialViewState).
@@ -631,7 +712,9 @@ export default function App() {
         // (was manual via FETCH VIEW). Skipped while drawing an AOI. The STAC
         // search is debounced downstream, so per-gesture moveend is fine.
         onMoveEnd={(e) => {
+          if (paused) return; // frozen: no auto-fetch / re-leveling on move
           if (!drawing && e.originalEvent) handleFetchViewport();
+          if (groundLevel) updateGroundBase();
         }}
         // attributionControl={false}  // comment out to re-enable the (i) badge bottom-right
         attributionControl={false}
@@ -660,6 +743,10 @@ export default function App() {
           // would render as bare terrain. Fetch once on load (same logic as
           // moveEnd, 50% buffer) so the whole opening frame fills with imagery.
           handleFetchViewport();
+          // Sample the ground base now that the map exists (the mount effect ran
+          // before mapRef was ready). Defaults on, so the opening view lands with
+          // high terrain already dropped toward z=0.
+          if (groundLevel) updateGroundBase();
         }}
       >
         <DeckGLOverlay layers={layers} onDevice={setDevice} />
@@ -713,6 +800,9 @@ export default function App() {
         onFetchViewport={() => handleFetchViewport(true)}
         onResetNorth={handleResetNorth}
         onSetDefaultView={handleSetDefaultView}
+        onResetView={handleResetView}
+        paused={paused}
+        onTogglePause={() => setPaused((v) => !v)}
         zoom={zoom}
         smoothing={smoothing}
         onSmoothingChange={setSmoothing}
@@ -721,6 +811,9 @@ export default function App() {
         terrainActive={terrainActive}
         exaggeration={exaggeration}
         onExaggerationChange={setExaggeration}
+        groundLevel={groundLevel}
+        onGroundLevelChange={setGroundLevel}
+        terrainBaseM={terrainBaseM}
       />
     </div>
   );
@@ -897,6 +990,9 @@ function InfoPanel({
   onFetchViewport,
   onResetNorth,
   onSetDefaultView,
+  onResetView,
+  paused,
+  onTogglePause,
   zoom,
   smoothing,
   onSmoothingChange,
@@ -905,6 +1001,9 @@ function InfoPanel({
   terrainActive,
   exaggeration,
   onExaggerationChange,
+  groundLevel,
+  onGroundLevelChange,
+  terrainBaseM,
 }: {
   sourceCount: number;
   year: number | null;
@@ -937,6 +1036,9 @@ function InfoPanel({
   onFetchViewport: () => void;
   onResetNorth: () => void;
   onSetDefaultView: () => void;
+  onResetView: () => void;
+  paused: boolean;
+  onTogglePause: () => void;
   zoom: number;
   smoothing: boolean;
   onSmoothingChange: (v: boolean) => void;
@@ -945,6 +1047,9 @@ function InfoPanel({
   terrainActive: boolean;
   exaggeration: number;
   onExaggerationChange: (v: number) => void;
+  groundLevel: boolean;
+  onGroundLevelChange: (v: boolean) => void;
+  terrainBaseM: number;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const pending = Math.max(0, sourceCount - stats.loaded - stats.failed);
@@ -1110,6 +1215,20 @@ function InfoPanel({
             title="Save the current camera (center, zoom, pitch, bearing) as the default view on reload"
           >
             SET DEFAULT
+          </Toggle>
+          <Toggle
+            active={false}
+            onClick={onResetView}
+            title="Reset the map to the default view"
+          >
+            RESET
+          </Toggle>
+          <Toggle
+            active={paused}
+            onClick={onTogglePause}
+            title="Pause move-driven auto-loading (imagery fetch + ground re-leveling) so panning/tilting doesn't reload the map"
+          >
+            {paused ? "PAUSED" : "PAUSE"}
           </Toggle>
           {hasMarker && (
             <Toggle active={showMarker} onClick={onToggleMarker}>
@@ -1351,6 +1470,18 @@ function InfoPanel({
                 >
                   <span>flat</span>
                   <span>{exaggeration.toFixed(1)}×</span>
+                </div>
+                <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8 }}>
+                  <Toggle
+                    active={groundLevel}
+                    onClick={() => onGroundLevelChange(!groundLevel)}
+                    title="Drop the in-view terrain base toward z=0 so high-altitude areas keep manageable zoom/camera (and fewer edge tiles get culled). Recomputed as you move."
+                  >
+                    GROUND LEVEL {groundLevel ? "ON" : "OFF"}
+                  </Toggle>
+                  <span style={{ fontFamily: UI.mono, fontSize: 10.5, color: UI.faint }}>
+                    {groundLevel && terrainBaseM > 0 ? `−${terrainBaseM} m` : "true elevation"}
+                  </span>
                 </div>
               </>
             )}
