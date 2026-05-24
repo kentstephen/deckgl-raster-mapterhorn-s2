@@ -91,13 +91,13 @@ they already demonstrate. This is a recurring instruction, not a one-time step.
     override knob needed.
   - Stick with the **10 m** DEM: Sentinel-2 is native 10 m, so a 1 m DEM under it
     doesn't make sense; 10 m is the best fit for the imagery.
-  - **DEM source correction (researched 2026-05-23):** the 10 m comes from
-    **USGS 3DEP**, delivered as terrarium tiles by AWS/Mapzen
-    (`elevation-tiles-prod`, PNG, maxzoom 15) — **not Mapterhorn**. Mapterhorn is
-    Copernicus **30 m** over the US (hi-res only in Europe/Switzerland), so it
-    can't serve the 10 m goal. Keep the DEM module source-agnostic (terrarium
-    decode works for both); default to USGS 10 m, keep Mapterhorn selectable for
-    later/EU. The repo name stays "mapterhorn" but the MVP DEM is USGS 3DEP.
+  - **DEM source confirmed (2026-05-23):** the 10 m comes from **USGS 3DEP
+    (`usgs3dep13`), served BY Mapterhorn** as its z13+ high-res source over CONUS
+    (`glo30` 30 m is the fallback below z13). Tiles:
+    `https://tiles.mapterhorn.com/{z}/{x}/{y}.webp` (terrarium WebP, maxzoom 17).
+    ⇒ terrain loading targets **z≥13**. Do NOT use AWS `elevation-tiles-prod`
+    (effectively 30 m). [Claude was briefly wrong here and pivoted to AWS — the
+    screenshots of Mapterhorn's own source popup corrected it.]
   - Note: COGs are likely **larger than the DEM tiles** (unconfirmed) — mind the
     COG-extent vs DEM-tile-grid relationship when wiring loading.
   - **Later (not first pass):** Mapterhorn appears to ship several

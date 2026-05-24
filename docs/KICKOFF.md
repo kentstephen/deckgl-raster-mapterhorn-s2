@@ -5,9 +5,9 @@ or coding done yet** — this is the plan only. Target area for the MVP is **Mou
 Washington / the Presidentials, NH**, using the predecessor's default bounding
 box for that area, tuned here first before generalizing.
 
-Constraints locked: **S2 temporal-mosaic COGs in CONUS**, **USGS 3DEP 10 m DEM**
-(via AWS/Mapzen terrarium tiles — NOT Mapterhorn, which is 30 m over the US),
-browser-only deck.gl + maplibre, no backend.
+Constraints locked: **S2 temporal-mosaic COGs in CONUS**, **USGS 3DEP 10 m DEM
+via Mapterhorn** (`usgs3dep13`, the z13+ high-res source over CONUS), browser-only
+deck.gl + maplibre, no backend.
 
 ---
 
@@ -37,28 +37,29 @@ Verified against the predecessor's installed `0.7.0` tree:
 - TODO at build time: still skim Dev Seed `deck.gl-raster` examples for any
   ready-made mesh-z/terrain pattern before hand-rolling the injection.
 
-## Phase 2 — DEM source ✅ RESEARCHED — pivot to USGS 10m (AWS terrain tiles)
+## Phase 2 — DEM source ✅ RESEARCHED — Mapterhorn (USGS 3DEP 10m at z13+)
 
-**Decision (Stephen, 2026-05-23): use the USGS 3DEP 10m DEM.** Mapterhorn does
-NOT carry it — Mapterhorn is Copernicus GLO-30 (30m) over the US (hi-res only in
-Europe/Switzerland). The USGS 3DEP 10m is published as terrarium tiles by
-Mapzen/AWS at `elevation-tiles-prod`:
+**Mapterhorn carries the USGS 3DEP 10m for CONUS** (`usgs3dep13`), confirmed by
+its own data-source popup. (My earlier "pivot to AWS terrain tiles" was wrong and
+is dropped — AWS `elevation-tiles-prod` is effectively 30m.)
 
-- URL: `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`
-- Terrarium **PNG**, minzoom 0 / **maxzoom 15**, **10m 3DEP over CONUS** (3m in
-  spots), SRTM 30m elsewhere. Decode `(R*256 + G + B/256) - 32768`.
-- This is plain z/x/y PNG — **no PMTiles reader needed** (simpler than Mapterhorn's
-  WebP PMTiles). Fetch PNG → draw to canvas / `createImageBitmap` → read pixels.
+- URL: `https://tiles.mapterhorn.com/{z}/{x}/{y}.webp` — terrarium **WebP**, 512px,
+  maxzoom 17. Decode `(R*256 + G + B/256) - 32768`.
+- **10m 3DEP only at z13+**; below that it's `glo30` 30m. ⇒ terrain loading
+  targets **z≥13** over CONUS (this also sets the min-zoom / auto-load behavior).
+- High-res is in regional `*.pmtiles`, but the xyz `.webp` endpoint serves them —
+  **likely no PMTiles reader needed**, just fetch xyz WebP. (If the xyz endpoint
+  misses high-res, fall back to reading the regional `*.pmtiles` via `pmtiles` lib.)
+- WebP decode: fetch → `createImageBitmap` → canvas → `getImageData` → pixels.
 
 Remaining Phase-2 tasks for 8 PM:
 
-7. **Verify `elevation-tiles-prod` CORS** from a localhost dev origin (hard gate).
-   If blocked: fallbacks are Mapterhorn 30m on source.coop (CORS-known-open) or a
-   dev proxy. Decode is identical, so the DEM module stays source-agnostic.
-8. Confirm 10m tiles render sane elevations over Mount Washington (z ~12–14;
-   maxzoom 15). Record the max usable zoom for the Presidentials.
-9. Keep the DEM module **source-agnostic** (terrarium decode + xyz fetch) so
-   Mapterhorn can plug in later as a selectable source.
+7. **Verify `tiles.mapterhorn.com` CORS** from a localhost dev origin (hard gate).
+   source.coop itself is known CORS-open; confirm the tiles host specifically.
+8. Confirm z13+ tiles return real 10m relief over Mount Washington (sanity-check a
+   known summit elevation ≈ 1917 m / 6288 ft). Record max usable zoom (≤17).
+9. Confirm the xyz endpoint actually serves `usgs3dep13` (not just glo30) at the
+   Presidentials z13–16; if not, switch to the regional PMTiles archive.
 
 ## Phase 3 — Bounding box + sources for the MVP area
 
@@ -95,9 +96,9 @@ Remaining Phase-2 tasks for 8 PM:
 ## Phase 6 — Build Path B (only if spike is green)
 
 18. Implement `elevationAt(lon, lat) → meters`: in-memory terrarium-tile cache
-    (mirror `geotiffCache`), fetch xyz PNG from `elevation-tiles-prod`, decode to
-    pixels (canvas/`createImageBitmap`), terrarium decode, bilinear sample.
-    Keep the source pluggable (USGS 10m default; Mapterhorn later).
+    (mirror `geotiffCache`), fetch xyz WebP from `tiles.mapterhorn.com` at z≥13,
+    decode to pixels (`createImageBitmap` → canvas → `getImageData`), terrarium
+    decode, bilinear sample.
 19. Inject z into the mesh: vendor/subclass `RasterLayer` so each vertex gets
     `z = elevationAt(x,y) * exaggeration` at `raster-layer.js:181` (3857 x,y →
     lon/lat). **Prefetch the DEM tiles covering the COG tile in `updateState`
@@ -121,12 +122,14 @@ Remaining Phase-2 tasks for 8 PM:
 
 ## Hard gates / risks to resolve early
 
-- **`elevation-tiles-prod` CORS** (task 7) — blocks the USGS 10m path if closed;
-  fallback = Mapterhorn 30m (source.coop, CORS-open) or a dev proxy.
+- **`tiles.mapterhorn.com` CORS** (task 7) — blocks the DEM path if closed;
+  fallback = regional `*.pmtiles` via `pmtiles` lib, or a dev proxy.
+- **z13+ for 10m** (task 9) — confirm the xyz endpoint serves `usgs3dep13`, not
+  just glo30, at the Presidentials.
 - **Spike result** (task 16) — go/no-go for Path B vs the heavier Path A pivot.
   This is the dominant unknown; everything else is wiring.
 - **Sync mesh build vs async DEM** (task 19) — prefetch-then-build ordering.
 - **Scale interaction** (task 17) — unknown, watch during spike.
 
 (Resolved already: deck.gl-raster mesh path + injection point + pinned versions
-— see Phase 1. DEM resolution question — see Phase 2: USGS 3DEP 10m, not Mapterhorn.)
+— see Phase 1. DEM source — see Phase 2: Mapterhorn, USGS 3DEP 10m at z13+.)
