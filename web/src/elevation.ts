@@ -85,10 +85,58 @@ function lngLatToTileXY(lng: number, lat: number, z: number): [number, number] {
 
 // ---- tile cache -------------------------------------------------------------
 
+// Bounded LRU cache. Each tile is 512*512 Float32 = 1 MB, and panning would
+// otherwise pile them up forever (the old unbounded Map was the memory hog /
+// crash). A Map preserves insertion order, so the oldest key is always first;
+// every read re-inserts to mark it most-recently-used, and we evict from the
+// front once we exceed the cap. ~400 tiles ≈ 400 MB — enough for the current
+// view plus recent pans without churn (re-evicting tiles still on screen), but
+// bounded so it can't pile up forever like the old unbounded Map did.
+const MAX_CACHED_TILES = 400;
 const cache = new Map<string, Float32Array>();
 const inflight = new Map<string, Promise<Float32Array | null>>();
 
+/** Read a tile and mark it most-recently-used (re-insert at Map tail). */
+function cacheGet(k: string): Float32Array | undefined {
+  const v = cache.get(k);
+  if (v !== undefined) {
+    cache.delete(k);
+    cache.set(k, v);
+  }
+  return v;
+}
+
+/** Insert a tile and evict the least-recently-used ones past the cap. */
+function cacheSet(k: string, v: Float32Array): void {
+  cache.delete(k);
+  cache.set(k, v);
+  while (cache.size > MAX_CACHED_TILES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
 const key = (z: number, x: number, y: number) => `${z}/${x}/${y}`;
+
+// Decode concurrency gate. Each tile decode runs a synchronous getImageData +
+// 262k-iteration loop on the main thread; firing hundreds at once (a fast pan)
+// freezes the tab. Cap how many run concurrently so the thread stays responsive.
+const MAX_CONCURRENT_DECODES = 6;
+let activeDecodes = 0;
+const decodeQueue: Array<() => void> = [];
+function acquireDecodeSlot(): Promise<void> {
+  if (activeDecodes < MAX_CONCURRENT_DECODES) {
+    activeDecodes++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => decodeQueue.push(resolve));
+}
+function releaseDecodeSlot(): void {
+  const next = decodeQueue.shift();
+  if (next) next();
+  else activeDecodes--;
+}
 
 // Listeners notified when a new DEM tile finishes decoding. The app subscribes
 // and bumps a `demVersion` so deck re-renders and the live elevated layer
@@ -109,12 +157,13 @@ async function fetchTerrainTile(
   y: number,
 ): Promise<Float32Array | null> {
   const k = key(z, x, y);
-  const cached = cache.get(k);
+  const cached = cacheGet(k);
   if (cached) return cached;
   const pending = inflight.get(k);
   if (pending) return pending;
 
   const p = (async () => {
+    await acquireDecodeSlot();
     try {
       const res = await fetch(TILE_URL(z, x, y));
       if (!res.ok) return null;
@@ -137,12 +186,13 @@ async function fetchTerrainTile(
         // terrarium -32768) so they can't spike into needles when exaggerated.
         elev[i] = e < -500 || e > 9000 ? 0 : e;
       }
-      cache.set(k, elev);
+      cacheSet(k, elev);
       notifyTileLoaded();
       return elev;
     } catch {
       return null;
     } finally {
+      releaseDecodeSlot();
       inflight.delete(k);
     }
   })();
@@ -167,6 +217,20 @@ export async function prefetchTilesForBounds(
   const xMax = Math.floor(Math.max(tx0, tx1));
   const yMin = Math.floor(Math.min(ty0, ty1));
   const yMax = Math.floor(Math.max(ty0, ty1));
+
+  // Guard: a wide or over-zoomed bounds can enumerate thousands of tiles, each
+  // 1 MB + a main-thread decode. Refuse to fetch past a sane ceiling so one
+  // prefetch can't OOM/freeze the tab. (Bounds should be ~viewport-sized; if
+  // this trips, demZoom is too high for the area — coarsen it upstream.)
+  const MAX_TILES_PER_PREFETCH = 256;
+  const tileCount = (xMax - xMin + 1) * (yMax - yMin + 1);
+  if (tileCount > MAX_TILES_PER_PREFETCH) {
+    console.warn(
+      `[elevation] prefetch skipped: ${tileCount} tiles at z${z} exceeds ${MAX_TILES_PER_PREFETCH} (demZoom too high for this extent)`,
+    );
+    return;
+  }
+
   const jobs: Promise<unknown>[] = [];
   for (let tx = xMin; tx <= xMax; tx++) {
     for (let ty = yMin; ty <= yMax; ty++) {
@@ -186,7 +250,7 @@ export function elevationAt(lng: number, lat: number, z: number): number {
   const [fx, fy] = lngLatToTileXY(lng, lat, z);
   const tx = Math.floor(fx);
   const ty = Math.floor(fy);
-  const tile = cache.get(key(z, tx, ty));
+  const tile = cacheGet(key(z, tx, ty));
   if (!tile) return 0;
 
   // pixel position within the tile (0..DEM_TILE_SIZE)

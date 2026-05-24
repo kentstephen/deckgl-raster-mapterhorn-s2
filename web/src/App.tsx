@@ -1,4 +1,11 @@
-import { MosaicLayer } from "@developmentseed/deck.gl-geotiff";
+import {
+  MosaicLayer,
+  COGLayer,
+  MultiCOGLayer,
+} from "@developmentseed/deck.gl-geotiff";
+import { TerrainLayer } from "@deck.gl/geo-layers";
+import { _TerrainExtension as TerrainExtension } from "@deck.gl/extensions";
+import { ClampedTerrainLoader } from "./raster/clampedTerrainLoader";
 import {
   COLORMAP_INDEX,
   createColormapTexture,
@@ -26,6 +33,11 @@ import {
   subscribeStats,
   type StatsSnapshot,
 } from "./loadStats";
+import {
+  clearConsoleCapture,
+  subscribeConsole,
+  type LogEntry,
+} from "./consoleCapture";
 import { resultToBbox, type GeoResult } from "./geocode";
 import { loadColorPrefs, saveColorPrefs } from "./prefs";
 import {
@@ -37,9 +49,6 @@ import { PlaceSearch } from "./PlaceSearch";
 import { loadGeoTIFF } from "./loadGeotiff";
 import { getTileData, type S2TileData } from "./getTileData";
 import { renderTile } from "./renderTile";
-import { ElevatedCOGLayer } from "./raster/ElevatedCOGLayer";
-import { ElevatedMultiCOGLayer } from "./raster/ElevatedMultiCOGLayer";
-import { demZoomForMapZoom, terrainActiveAtZoom, subscribeDemTiles } from "./elevation";
 import {
   bandSlotsFor,
   buildRenderPipeline,
@@ -85,9 +94,10 @@ function getCachedGeoTIFF(url: string): Promise<GeoTIFF> {
 // (filtered out by stac.ts CORS_OK_HOSTS).
 const AVAILABLE_YEARS = [2022, 2023, 2024] as const;
 const DEFAULT_YEAR = 2023;
-// Grand Teton / Snake River — Jackson Hole, WY. Dramatic relief: the Tetons rise
-// ~2100 m straight off the valley floor (Grand Teton 4199 m).
-const STAC_BBOX: [number, number, number, number] = [-111.0, 43.5, -110.5, 44.0];
+// Grand Canyon, AZ — South Rim across the canyon. Big, legible relief: the rim
+// stands ~1500 m above the Colorado River, easy to read while evaluating the
+// drape/terrain.
+const STAC_BBOX: [number, number, number, number] = [-112.5, 35.95, -111.8, 36.45];
 // Ceiling for the "fetch viewport" AOI span (deg/axis) so a zoomed-out view
 // can't enumerate thousands of COGs. Matches geocode.ts's maxSpanDeg.
 const MAX_VIEWPORT_SPAN_DEG = 5.0;
@@ -168,6 +178,8 @@ export default function App() {
   const [showMarker, setShowMarker] = useState(false);
   const [drawing, setDrawing] = useState(false);
   const [stats, setStats] = useState<LoadStats>({ loaded: 0, failed: 0, failures: [] });
+  // Captured console.error/warn + uncaught errors, for the copyable in-panel log.
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   // Live map zoom, mirrored for the on-panel readout (diagnostic). Seed it to
   // the initial view zoom (13) so terrain is active on first paint — otherwise
   // terrainActiveAtZoom() sees a stale 9 until the first move event.
@@ -179,32 +191,61 @@ export default function App() {
   // multiplies real elevation in the mesh (1 = true scale).
   const [terrainEnabled, setTerrainEnabled] = useState<boolean>(true);
   const [exaggeration, setExaggeration] = useState<number>(1);
-  // Bumped (throttled) whenever a DEM tile finishes decoding, so the elevated
-  // layers re-render and rebuild their mesh against the now-warm cache. (The
-  // layer can't self-rebuild from its async fetch — see ElevatedRasterLayer.)
-  const [demVersion, setDemVersion] = useState<number>(0);
-  useEffect(() => {
-    let scheduled = false;
-    return subscribeDemTiles(() => {
-      if (scheduled) return;
-      scheduled = true;
-      setTimeout(() => {
-        scheduled = false;
-        setDemVersion((v) => v + 1);
-      }, 800);
-    });
-  }, []);
-  // DEM tile zoom, derived from the map zoom and clamped to the 10 m band
-  // (z13–15). Stable integer, so it only rebuilds layers at zoom thresholds.
-  const demZoom = useMemo(() => demZoomForMapZoom(zoom), [zoom]);
-  // Whether terrain is active at the current zoom (off below z13 by default;
-  // see BELOW_MIN_ZOOM_BEHAVIOR). Memoized boolean → only flips at the
-  // threshold, not on every pan/zoom frame.
-  const aboveTerrainZoom = useMemo(() => terrainActiveAtZoom(zoom), [zoom]);
-  const terrainActive = terrainEnabled && aboveTerrainZoom;
+  // Terrain is now handled by deck's own TerrainLayer (DEM tiling + terrarium
+  // decode on workers + LOD/overzoom) and TerrainExtension (drapes the S2
+  // imagery onto that surface). No hand-rolled mesh, no main-thread decode, no
+  // demVersion rebuild loop, no z-cliff — TerrainLayer overzooms past z13. So
+  // `terrainActive` is simply whether the user enabled it.
+  const terrainActive = terrainEnabled;
+
+  // One shared TerrainExtension instance for all draped imagery layers.
+  const terrainExtension = useMemo(() => new TerrainExtension(), []);
+
+  // The terrain surface itself: Mapterhorn terrarium tiles (usgs3dep13 10 m at
+  // z13+, glo30 below). `operation: 'terrain+draw'` makes it both the elevation
+  // source AND a visible base (dark fill where no imagery covers); layers with
+  // `terrainExtension` drape on top. Exaggeration is folded into the decoder
+  // (each scaler × k) so relief = realMeters × k. Changing it reloads the mesh.
+  const terrainLayer = useMemo(() => {
+    if (!terrainActive) return null;
+    const k = exaggeration;
+    return new TerrainLayer({
+      id: "terrain",
+      elevationData: "https://tiles.mapterhorn.com/{z}/{x}/{y}.webp",
+      elevationDecoder: {
+        rScaler: 256 * k,
+        gScaler: 1 * k,
+        bScaler: (1 / 256) * k,
+        offset: -32768 * k,
+      },
+      // The terrain surface: 'terrain+draw' provides the mesh that imagery drapes
+      // onto AND draws a dark fill (color below) where no COG covers. Imagery is
+      // forced to terrainDrawMode:'drape' (see MosaicLayer props), so it renders
+      // as a cover texture on this mesh — no competing offset mesh to poke
+      // through, and it follows the full relief.
+      operation: "terrain+draw" as any,
+      meshMaxError: 4,
+      color: [38, 42, 46],
+      // Mapterhorn's 10 m usgs3dep13 exists ONLY at z13+ (z12 and below = 30 m
+      // glo30, which crumples). The inner TileLayer derives the fetched tile-zoom
+      // from the viewport zoom; tileSize:256 (vs the 512 default) shifts that one
+      // level DEEPER, so a viewport at z11–12 pulls z13 (10 m) tiles. Cost: ~4×
+      // more terrain tiles fetched/meshed per screen. maxZoom:17 = endpoint cap.
+      tileSize: 256,
+      maxZoom: 17,
+      // Clamping loader kills the nodata "needle" spikes the stock terrarium
+      // decoder leaves in (Mapterhorn WebP nodata at water/edges). See
+      // raster/clampedTerrainLoader.ts.
+      loaders: [ClampedTerrainLoader],
+      beforeId: labelBeforeId,
+    } as any);
+  }, [terrainActive, exaggeration, labelBeforeId]);
 
   // Mirror the module-level load scoreboard into React state.
   useEffect(() => subscribeStats(setStats), []);
+
+  // Mirror captured console errors/warnings into state for the in-panel log.
+  useEffect(() => subscribeConsole(setLogs), []);
 
   // Persist color/look prefs whenever they change, so they survive a reload.
   useEffect(() => {
@@ -293,7 +334,9 @@ export default function App() {
 
   useEffect(() => {
     const ac = new AbortController();
-    setStacItems([]);
+    // Do NOT clear stacItems here — keep the current imagery on screen until the
+    // new results arrive, so a refetch (AOI/year change) swaps in place instead
+    // of blinking to empty first. setStacItems(items) below replaces it.
     setStacError(null);
     // Debounce: rapid bbox changes (draw-tool drags, repeated searches) would
     // otherwise kick off overlapping /search paginations against the public
@@ -344,7 +387,11 @@ export default function App() {
     let s = b.getSouth();
     let e = b.getEast();
     let n = b.getNorth();
-    const margin = 0.1; // 10% buffer beyond the visible edges
+    // Fetch a bbox much larger than the visible view so there's real pan
+    // headroom: with a tight buffer, every small pan pushed the view past the
+    // loaded edge and refetched (the "reloads on every move"). 50% on each side
+    // ≈ 2× the viewport span, so you can pan/zoom a fair bit before it refetches.
+    const margin = 0.5;
     const dw = (e - w) * margin;
     const dh = (n - s) * margin;
     w -= dw; e += dw; s -= dh; n += dh;
@@ -354,8 +401,26 @@ export default function App() {
     const maxHalf = MAX_VIEWPORT_SPAN_DEG / 2;
     const halfW = Math.min((e - w) / 2, maxHalf);
     const halfH = Math.min((n - s) / 2, maxHalf);
+    const next: [number, number, number, number] = [
+      cx - halfW,
+      cy - halfH,
+      cx + halfW,
+      cy + halfH,
+    ];
+    // Only refetch if the view has actually left what we already loaded.
+    // Without this, EVERY pan (even a nudge) changed `bbox` → cleared and
+    // refetched STAC → rebuilt the MosaicLayer → reopened+re-decoded every COG.
+    // That was the "tiles reload every move" + the memory churn. If the current
+    // viewport is still inside the loaded bbox (with a small margin), do nothing.
+    const cur = bbox;
+    const inside =
+      next[0] >= cur[0] - 1e-6 &&
+      next[1] >= cur[1] - 1e-6 &&
+      next[2] <= cur[2] + 1e-6 &&
+      next[3] <= cur[3] + 1e-6;
+    if (inside) return;
     setMarker(null);
-    setBbox([cx - halfW, cy - halfH, cx + halfW, cy + halfH]);
+    setBbox(next);
   };
 
   // Snap the map back to plan view: bearing → north, pitch → flat.
@@ -380,7 +445,11 @@ export default function App() {
   };
 
   const layers = useMemo(() => {
-    if (stacItems.length === 0) return [];
+    // Terrain surface goes first (under the draped imagery + labels). It shows
+    // even with no imagery loaded yet, so panning to a new area reveals relief
+    // immediately while the COGs stream in.
+    const base = terrainLayer ? [terrainLayer] : [];
+    if (stacItems.length === 0) return base;
 
     // RGB: render the single precomposed 3-band TCI COG per item through
     // COGLayer (the deck.gl-raster naip-mosaic pattern). One COG per item, so
@@ -406,7 +475,7 @@ export default function App() {
           );
         },
         renderSource: (source, { data }) =>
-          new (ElevatedCOGLayer as any)({
+          new (COGLayer as any)({
             // Smoothing is baked into each tile's texture sampler, so the id
             // includes it — toggling forces deck to rebuild tiles with the new
             // filter rather than reusing the cached (wrong-sampler) textures.
@@ -419,22 +488,21 @@ export default function App() {
             signal: genSignal,
             refinementStrategy: "best-available",
             maxRequests: 16,
-            // Terrain: lift each tile's mesh by the DEM.
-            terrainEnabled: terrainActive,
-            exaggeration,
-            demZoom,
-            demVersion,
-            // renderTile drives renderSubLayers re-runs (raster-tile-layer.js).
-            // Terrain props must be here too so cached tiles re-elevate when the
-            // slider / flat toggle / dem zoom change.
+            // Terrain: drape onto the TerrainLayer surface (empty = flat).
+            // Force 'drape' — TerrainExtension would otherwise auto-pick 'offset'
+            // for the instanced MeshTextureLayer, which rigidly shifts each flat
+            // COG tile by one anchor's height (flat plates / glitch) instead of
+            // mapping the imagery as a texture onto the terrain mesh.
+            extensions: terrainActive ? [terrainExtension] : [],
+            terrainDrawMode: "drape",
             updateTriggers: {
-              renderTile: [rgbGain, terrainActive, exaggeration, demZoom, demVersion],
+              renderTile: [rgbGain],
             },
           } as any),
         // @ts-expect-error beforeId is injected by @deck.gl/mapbox
         beforeId: labelBeforeId,
       });
-      return [mosaic];
+      return [...base, mosaic];
     }
 
     // Spectral indices: need a 2-band ratio, so keep the MultiCOGLayer composite
@@ -473,7 +541,7 @@ export default function App() {
           );
           sourcesCache.current.set(cacheKey, sources);
         }
-        return new (ElevatedMultiCOGLayer as any)({
+        return new (MultiCOGLayer as any)({
           id: `s2-multi-${mode}-${gen}-${source.id}`,
           sources,
           composite,
@@ -483,30 +551,27 @@ export default function App() {
           // See docs/PERF_KNOBS.md for the full menu + drawbacks.
           refinementStrategy: "best-available",
           maxRequests: 16,
-          // Terrain: drape the index render over the DEM (same as RGB).
-          terrainEnabled: terrainActive,
-          exaggeration,
-          demZoom,
-          demVersion,
+          // Terrain: drape the index render onto the TerrainLayer (same as RGB).
+          extensions: terrainActive ? [terrainExtension] : [],
+          terrainDrawMode: "drape",
           // Inner RasterTileLayer caches each tile's renderPipeline result
           // (raster-tile-layer.ts:338 wires renderTile → renderSubLayers).
-          // Without this, colormap/terrain prop changes never reach already-
-          // rendered tiles.
+          // Without this, colormap changes never reach already-rendered tiles.
           updateTriggers: {
-            renderTile: [mode, ndviColormap, ndviRange[0], ndviRange[1], ndviScale, ndviReversed, colormapTexture, terrainActive, exaggeration, demZoom, demVersion],
+            renderTile: [mode, ndviColormap, ndviRange[0], ndviRange[1], ndviScale, ndviReversed, colormapTexture],
           },
         } as any);
       },
       // @ts-expect-error beforeId is injected by @deck.gl/mapbox
       beforeId: labelBeforeId,
     });
-    return [mosaic];
-  }, [stacItems, labelBeforeId, mode, gen, colormapTexture, colormapIndexMap, rgbGain, smoothing, terrainActive, exaggeration, demZoom, demVersion, ndviColormap, ndviRange, ndviScale, ndviReversed]);
+    return [...base, mosaic];
+  }, [stacItems, labelBeforeId, mode, gen, colormapTexture, colormapIndexMap, rgbGain, smoothing, terrainActive, terrainLayer, terrainExtension, ndviColormap, ndviRange, ndviScale, ndviReversed]);
 
   const initialViewState = {
-    // Grand Teton summit, looking across Jackson Hole / the Snake River.
-    longitude: -110.8024,
-    latitude: 43.7412,
+    // Grand Canyon South Rim (Mather Point area), looking north across the canyon.
+    longitude: -112.11,
+    latitude: 36.03,
     zoom: 12, // wider than z13 so Sentinel-2 isn't over-zoomed; terrain on at z12
     // Tilt back so distant terrain fills toward the top of the screen, but keep
     // the top just BELOW the horizon (no sky/void) — the standard deck.gl 3D
@@ -520,7 +585,12 @@ export default function App() {
       <MaplibreMap
         ref={mapRef}
         initialViewState={initialViewState}
-        minZoom={3}
+        // Floor at z9 so a zoomed-out view can't make the whole STAC AOI
+        // visible at once — that's what opens every COG in the bbox and hits
+        // the ~1GB memory wall (see reference HANDOFF-FROM-CDL.md). z9 still
+        // allows pulling back to look down at terrain (active z10+); below that
+        // it only fanned out into a crash. Stephen's own call: "raise min zoom".
+        minZoom={9}
         maxPitch={60}
         onMove={(e) => setZoom(e.viewState.zoom)}
         // Auto-fetch imagery for wherever you pan/zoom so frame edges fill in
@@ -550,6 +620,12 @@ export default function App() {
           map.on("movestart", (ev: any) => {
             if (ev.originalEvent) setShowMarker(false);
           });
+          // Fit the initial fetch to what's actually visible. The default
+          // STAC_BBOX only covers a slab around the center; under pitch the view
+          // also sees foreground (south) and distance (north) beyond it, which
+          // would render as bare terrain. Fetch once on load (same logic as
+          // moveEnd, 50% buffer) so the whole opening frame fills with imagery.
+          handleFetchViewport();
         }}
       >
         <DeckGLOverlay layers={layers} onDevice={setDevice} />
@@ -578,6 +654,7 @@ export default function App() {
         onYearChange={setYear}
         error={stacError}
         stats={stats}
+        logs={logs}
         mode={mode}
         onModeChange={setMode}
         rgbGain={rgbGain}
@@ -760,6 +837,7 @@ function InfoPanel({
   onYearChange,
   error,
   stats,
+  logs,
   mode,
   onModeChange,
   rgbGain,
@@ -798,6 +876,7 @@ function InfoPanel({
   onYearChange: (y: number) => void;
   error: string | null;
   stats: LoadStats;
+  logs: LogEntry[];
   mode: RenderMode;
   onModeChange: (m: RenderMode) => void;
   rgbGain: number;
@@ -1300,6 +1379,9 @@ function InfoPanel({
         </Section>
       )}
 
+      {/* Console: captured errors/warnings, copyable without DevTools */}
+      <ConsoleLog logs={logs} />
+
       {/* Footer: provenance */}
       <div
         style={{
@@ -1392,6 +1474,107 @@ function InfoPanel({
     </div>
   );
 }
+
+/**
+ * In-panel console: shows captured console.error/warn + uncaught errors so they
+ * can be read and copied without opening DevTools. Errors are tinted red, warns
+ * amber; repeated identical lines collapse with an ×N count. "copy all" yields a
+ * plain-text dump; "clear" empties the store.
+ */
+function ConsoleLog({ logs }: { logs: LogEntry[] }) {
+  const [open, setOpen] = useState(false);
+  const errors = logs.filter((l) => l.level === "error").length;
+  const warns = logs.length - errors;
+  if (logs.length === 0) return null;
+
+  const copyAll = () => {
+    const text = logs
+      .map((l) => `[${l.level.toUpperCase()}]${l.count > 1 ? ` ×${l.count}` : ""} ${l.text}`)
+      .join("\n\n");
+    navigator.clipboard?.writeText(text).catch(() => {});
+  };
+
+  return (
+    <Section label="Console">
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          style={{
+            flex: 1,
+            textAlign: "left",
+            fontFamily: UI.mono,
+            fontSize: 12,
+            background: "transparent",
+            border: "none",
+            cursor: "pointer",
+            color: errors > 0 ? "#f0a3a3" : "#e6c98a",
+            padding: 0,
+          }}
+        >
+          {open ? "▾" : "▸"} {errors} error{errors !== 1 ? "s" : ""} ·{" "}
+          {warns} warning{warns !== 1 ? "s" : ""}
+        </button>
+        <button type="button" onClick={copyAll} style={logBtnStyle}>
+          copy all
+        </button>
+        <button type="button" onClick={clearConsoleCapture} style={logBtnStyle}>
+          clear
+        </button>
+      </div>
+      {open && (
+        <ul
+          style={{
+            margin: "8px 0 0 0",
+            padding: 0,
+            listStyle: "none",
+            maxHeight: 220,
+            overflow: "auto",
+            userSelect: "text",
+            WebkitUserSelect: "text",
+          }}
+        >
+          {logs
+            .slice()
+            .reverse()
+            .map((l, i) => (
+              <li
+                key={i}
+                style={{
+                  fontFamily: UI.mono,
+                  fontSize: 10.5,
+                  lineHeight: 1.4,
+                  color: l.level === "error" ? "#f0a3a3" : "#e6c98a",
+                  borderTop: i === 0 ? "none" : `1px solid ${UI.hairline}`,
+                  padding: "5px 0",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  userSelect: "all",
+                  WebkitUserSelect: "all",
+                }}
+              >
+                {l.count > 1 && (
+                  <span style={{ color: UI.faint }}>×{l.count} </span>
+                )}
+                {l.text}
+              </li>
+            ))}
+        </ul>
+      )}
+    </Section>
+  );
+}
+
+const logBtnStyle: React.CSSProperties = {
+  fontFamily: UI.mono,
+  fontSize: 11,
+  padding: "2px 8px",
+  background: UI.field,
+  color: UI.text,
+  border: `1px solid ${UI.fieldBorder}`,
+  borderRadius: 4,
+  cursor: "pointer",
+};
 
 /**
  * Compact editable number box (kepler-style) for slider values. Commits any

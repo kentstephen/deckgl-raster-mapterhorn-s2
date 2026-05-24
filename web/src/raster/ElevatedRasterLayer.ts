@@ -23,12 +23,13 @@ import {
  * a prefetch, and rebuild once tiles land.
  */
 
-// Regular-grid tessellation per COG tile (segments per axis). 64 → 4225
-// verts/tile. 128 looked smooth but hit ~1.4 GB / froze — though most of that was
-// a layer leak (now fixed via getSubLayerProps), so 64 should be safe and far
-// less blocky than 32. Detail also sharpens as you zoom in (tiles get smaller).
-// TODO: tie grid to DEM resolution for true 10 m if 64 still reads coarse.
-const TERRAIN_GRID = 64;
+// Adaptive grid: target ~one mesh vertex per this many ground meters, so a
+// zoomed-out tile (large span, few on screen) gets a fine mesh and the whole
+// range reads as terrain — not just the peak under the camera. Capped so a
+// single huge tile can't blow the vertex budget. (DEM is ~10 m; 35 m spacing is
+// a good detail/perf balance — drop toward 10 to approach native, raise if heavy.)
+const TERRAIN_TARGET_SPACING_M = 35;
+const TERRAIN_GRID_MAX = 192;
 
 export class ElevatedRasterLayer extends RasterLayer {
   static layerName = "ElevatedRasterLayer";
@@ -101,7 +102,18 @@ export class ElevatedRasterLayer extends RasterLayer {
     // 4 corner vertices and can't represent relief. Build a dense REGULAR grid
     // instead and sample the DEM at every vertex. Pixel coords span 0..width
     // (the +1 edge) to keep neighboring COG tiles aligned, matching upstream.
-    const N = TERRAIN_GRID;
+    //
+    // ADAPTIVE density: vertices ∝ the tile's ground span, so a zoomed-OUT tile
+    // (large area, few of them on screen) gets a fine mesh and the whole range
+    // reads as real terrain — not just the peak you're sitting on. Zoomed-in
+    // tiles are small (many on screen) so a lower N keeps the budget bounded.
+    const c0 = forwardReproject(...forwardTransform(0, 0)); // 3857 m
+    const c1 = forwardReproject(...forwardTransform(width, height));
+    const spanM = Math.max(Math.abs(c1[0] - c0[0]), Math.abs(c1[1] - c0[1]));
+    const N = Math.max(
+      24,
+      Math.min(TERRAIN_GRID_MAX, Math.round(spanM / TERRAIN_TARGET_SPACING_M)),
+    );
     const dim = N + 1;
     const numVertices = dim * dim;
     const positions = new Float32Array(numVertices * 3);
