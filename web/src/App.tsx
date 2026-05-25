@@ -6,7 +6,7 @@ import {
 import { TerrainLayer } from "@deck.gl/geo-layers";
 import { _TerrainExtension as TerrainExtension } from "@deck.gl/extensions";
 import { ClampedTerrainLoader } from "./raster/clampedTerrainLoader";
-import { load, parse } from "@loaders.gl/core";
+import { parse } from "@loaders.gl/core";
 import { readTerrainTile } from "./terrain/mapterhornPmtiles";
 import {
   COLORMAP_INDEX,
@@ -265,15 +265,17 @@ export default function App() {
     const k = exaggeration;
     return new TerrainLayer({
       id: "terrain",
-      // Sentinel template — the custom `fetch` below routes by zoom (it still
-      // contains {z}/{x}/{y} so deck treats elevationData as tiled). z<=12 base
-      // → xyz endpoint; z>=13 detail → source.coop regional PMTiles (read direct
-      // to dodge the per-tile maxRequests bottleneck). See terrain/mapterhornPmtiles.
+      // Sentinel template — the custom `fetch` below reads the tile bytes itself
+      // (it still contains {z}/{x}/{y} so deck treats elevationData as tiled).
+      // ALL zooms now range-read from source.coop PMTiles: z<=12 from the global
+      // planet.pmtiles base (glo30 30 m), z>=13 from the regional usgs3dep
+      // archives (10 m). One consistent S3 path — coalesced reads + shared
+      // directory cache, no per-tile xyz CDN. See terrain/mapterhornPmtiles.
       elevationData: "mapterhorn://{z}/{x}/{y}",
       // Custom loader: TerrainLayer calls props.fetch(url, {loadOptions, signal})
-      // and awaits the parsed mesh (terrain-layer.js). We read the tile bytes
-      // ourselves (xyz for the base, PMTiles for detail) then hand them to the
-      // same ClampedTerrainLoader via loaders.gl parse — decode path unchanged.
+      // and awaits the parsed mesh (terrain-layer.js). We read the PMTiles bytes
+      // via readTerrainTile then hand them to ClampedTerrainLoader via loaders.gl
+      // parse — decode path unchanged.
       fetch: (async (url: string, ctx: any) => {
         const loadOptions = ctx?.loadOptions;
         const signal = ctx?.signal;
@@ -282,15 +284,6 @@ export default function App() {
         const z = +m[1];
         const x = +m[2];
         const y = +m[3];
-        if (z <= 12) {
-          // glo30 30 m base — keep the existing xyz endpoint (the global detail
-          // lives in the 705 GB planet.pmtiles, not worth range-reading).
-          return load(
-            `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`,
-            ClampedTerrainLoader as any,
-            loadOptions,
-          );
-        }
         const buf = await readTerrainTile(z, x, y, signal);
         if (!buf) return null; // no coverage / beyond region maxZoom → flat
         return parse(buf, ClampedTerrainLoader as any, loadOptions);

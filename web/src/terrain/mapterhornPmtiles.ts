@@ -25,6 +25,13 @@ import { PMTiles, FetchSource } from "pmtiles";
 const SOURCE_COOP_BASE =
   "https://s3.us-west-2.amazonaws.com/us-west-2.opendata.source.coop/mapterhorn/mapterhorn/";
 
+// Global z0-12 base archive (glo30 30 m terrarium). 705 GB, but range-read like
+// any PMTiles: header + a 6.6 KB root directory on open, leaf dirs + tile bytes
+// fetched on demand. Serving the base from here (instead of the per-tile xyz CDN
+// tiles.mapterhorn.com) puts ALL terrain on the same source.coop range-read path
+// — coalesced reads, shared directory cache, one consistent host.
+const PLANET_ARCHIVE = "planet.pmtiles";
+
 /** One regional archive's coverage, from download_urls.json. */
 interface ArchiveEntry {
   name: string; // e.g. "6-11-24.pmtiles"
@@ -103,10 +110,11 @@ function getArchive(name: string): PMTiles {
 }
 
 /**
- * Read one z>=13 terrarium webp tile directly from the covering regional PMTiles
- * archive. Returns the raw bytes for ClampedTerrainLoader, or null if the tile
- * isn't present (water / edge / beyond the region's max zoom / no coverage) —
- * the caller treats null as "no terrain here" (flat).
+ * Read one terrarium tile directly from source.coop. z<=12 comes from the global
+ * planet.pmtiles base (glo30 30 m); z>=13 from the covering regional archive
+ * (usgs3dep 10 m over CONUS). Returns the raw bytes for ClampedTerrainLoader, or
+ * null if the tile isn't present (water / edge / beyond the region's max zoom /
+ * no coverage) — the caller treats null as "no terrain here" (flat).
  */
 export async function readTerrainTile(
   z: number,
@@ -114,6 +122,12 @@ export async function readTerrainTile(
   y: number,
   signal?: AbortSignal,
 ): Promise<ArrayBuffer | null> {
+  // z<=12 base: global planet archive, no index lookup needed (covers z0-12
+  // everywhere). null (e.g. ocean) → flat, which is correct.
+  if (z <= 12) {
+    const resp = await getArchive(PLANET_ARCHIVE).getZxy(z, x, y, signal);
+    return resp?.data ?? null;
+  }
   const idx = await loadIndex();
   const name = archiveNameFor(z, x, y);
   const entry = idx.get(name);
