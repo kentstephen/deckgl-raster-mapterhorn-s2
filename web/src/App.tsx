@@ -1334,6 +1334,9 @@ function InfoPanel({
           zoom {zoom.toFixed(2)} · dpr {window.devicePixelRatio}
         </div>
         <div style={{ marginTop: 9, display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {/* DRAW AOI + FETCH VIEW commented out for now (per Stephen 2026-05-25).
+              Handlers (onToggleDraw / onFetchViewport, drawing state) are kept
+              wired so these can be restored by uncommenting.
           <Toggle
             active={drawing}
             onClick={onToggleDraw}
@@ -1348,6 +1351,7 @@ function InfoPanel({
           >
             FETCH VIEW
           </Toggle>
+          */}
           <Toggle active={labels} onClick={() => onLabelsChange(!labels)}>
             LABELS {labels ? "ON" : "OFF"}
           </Toggle>
