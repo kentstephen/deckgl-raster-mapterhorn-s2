@@ -6,6 +6,8 @@ import {
 import { TerrainLayer } from "@deck.gl/geo-layers";
 import { _TerrainExtension as TerrainExtension } from "@deck.gl/extensions";
 import { ClampedTerrainLoader } from "./raster/clampedTerrainLoader";
+import { load, parse } from "@loaders.gl/core";
+import { readTerrainTile } from "./terrain/mapterhornPmtiles";
 import {
   COLORMAP_INDEX,
   createColormapTexture,
@@ -116,16 +118,20 @@ const MAX_VIEWPORT_SPAN_DEG = 5.0;
 // the TerrainLayer's inner TileLayer minZoom:13 + an `extent` (deck only does
 // the overzoom-clamp-UP when extent is set — deck.gl#7586), so z13 tiles render
 // across a zoomed-out frame. Cost is geometric (each level out ≈ 4× tiles), so:
-//   - only within the [MIN, MAX) map-zoom BAND (2 levels: hold 10 m down to z11),
-//   - and only within a TIGHT camera-centered extent box (not the 5° imagery
-//     AOI, not CONUS — that was the reverted attempt that fanned out to ~12k
-//     z13 tiles). Beyond the box the far background uses natural LOD / glo30.
-const TERRAIN_DETAIL_MIN_MAPZOOM = 11; // band floor — below this, no forcing
-// (tried 10; relief didn't hold there, so 11 is the working floor)
+//   - only within the [MIN, MAX) map-zoom BAND (hold 10 m down to z10),
+//   - and only within a camera-centered extent box sized to COVER the frame
+//     (capped so pitch can't fan it unbounded). Beyond the box → natural LOD.
+// The detail tiles range-read from source.coop PMTiles (terrain/mapterhornPmtiles
+// + the TerrainLayer `fetch` below), which dodges the per-tile maxRequests=6
+// bottleneck — that's what makes the larger box / z10 floor actually settle.
+const TERRAIN_DETAIL_MIN_MAPZOOM = 10; // band floor — below this, no forcing.
+// (z10 now holds because detail tiles range-read from PMTiles settle fast.)
 const TERRAIN_DETAIL_MAX_MAPZOOM = 12.5; // above this, z13 is already native
 const TERRAIN_DETAIL_DEM_Z = 13; // the 10 m source floor we clamp tiles up to
-const TERRAIN_EXTENT_MAX_HALF_DEG = 0.6; // caps the box under pitch (getBounds
-// balloons toward the horizon); ~1.2° box ≈ a few hundred z13 tiles, bounded.
+const TERRAIN_EXTENT_MAX_HALF_DEG = 1.5; // box must COVER the zoomed-out frame so
+// nothing renders flat outside it (the old 0.6° box left the z10 frame mostly
+// flat). Still capped so pitch's horizon-balloon getBounds() can't fan unbounded;
+// PMTiles range-reads make the larger z13 tile count affordable.
 
 // Imagery accumulates across pans (so tiles don't drop when you move) — but
 // unbounded growth = unbounded open COGs / decoded textures. Cap the retained
@@ -270,7 +276,36 @@ export default function App() {
     const k = exaggeration;
     return new TerrainLayer({
       id: "terrain",
-      elevationData: "https://tiles.mapterhorn.com/{z}/{x}/{y}.webp",
+      // Sentinel template — the custom `fetch` below routes by zoom (it still
+      // contains {z}/{x}/{y} so deck treats elevationData as tiled). z<=12 base
+      // → xyz endpoint; z>=13 detail → source.coop regional PMTiles (read direct
+      // to dodge the per-tile maxRequests bottleneck). See terrain/mapterhornPmtiles.
+      elevationData: "mapterhorn://{z}/{x}/{y}",
+      // Custom loader: TerrainLayer calls props.fetch(url, {loadOptions, signal})
+      // and awaits the parsed mesh (terrain-layer.js). We read the tile bytes
+      // ourselves (xyz for the base, PMTiles for detail) then hand them to the
+      // same ClampedTerrainLoader via loaders.gl parse — decode path unchanged.
+      fetch: (async (url: string, ctx: any) => {
+        const loadOptions = ctx?.loadOptions;
+        const signal = ctx?.signal;
+        const m = /mapterhorn:\/\/(\d+)\/(\d+)\/(\d+)/.exec(url);
+        if (!m) return null;
+        const z = +m[1];
+        const x = +m[2];
+        const y = +m[3];
+        if (z <= 12) {
+          // glo30 30 m base — keep the existing xyz endpoint (the global detail
+          // lives in the 705 GB planet.pmtiles, not worth range-reading).
+          return load(
+            `https://tiles.mapterhorn.com/${z}/${x}/${y}.webp`,
+            ClampedTerrainLoader as any,
+            loadOptions,
+          );
+        }
+        const buf = await readTerrainTile(z, x, y, signal);
+        if (!buf) return null; // no coverage / beyond region maxZoom → flat
+        return parse(buf, ClampedTerrainLoader as any, loadOptions);
+      }) as any,
       elevationDecoder: {
         rScaler: 256 * k,
         gScaler: 1 * k,
@@ -294,6 +329,10 @@ export default function App() {
       // more terrain tiles fetched/meshed per screen. maxZoom:17 = endpoint cap.
       tileSize: 256,
       maxZoom: 17,
+      // Detail tiles now range-read from PMTiles (coalesced), so the default 6 is
+      // overly cautious — let more meshing run in parallel so a zoomed-out frame
+      // of z13 tiles actually settles.
+      maxRequests: 20,
       // Budgeted 10 m hold on zoom-out: when terrainExtent is set (map zoom is in
       // the detail band, see updateTerrainExtent), clamp the inner TileLayer to
       // z13+ within that tight box so the frame keeps 10 m instead of crumpling
