@@ -62,6 +62,7 @@ export const INDEX_COLORMAPS = [
   "sunset",
   "sunsetdark",
   "teal",
+  "bluyl",
   "blues",
   "oranges",
 ] as const;

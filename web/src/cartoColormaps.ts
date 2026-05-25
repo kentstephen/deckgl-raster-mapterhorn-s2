@@ -24,8 +24,9 @@ export const CARTO_PALETTES = {
   sunsetdark: ["#fcde9c", "#faa476", "#f0746e", "#e34f6f", "#dc3977", "#b9257a", "#7c1d6f"],
   // Sequential pale → deep blue-green. Natural read for NDWI/water.
   teal: ["#d1eeea", "#a8dbd9", "#85c4c9", "#68abb8", "#4f90a6", "#3b738f", "#2a5674"],
-  // TODO: add CARTO `BluYl` (blue → yellow) and `TeaGrn` (teal → green)
-  // palettes here. Not now.
+  // Sequential pale-yellow → green → teal → deep blue. High-contrast sequential.
+  bluyl: ["#f7feae", "#b7e6a5", "#7ccba2", "#46aea0", "#089099", "#00718b", "#045275"],
+  // TODO: add CARTO `TeaGrn` (teal → green) palette here. Not now.
 } as const;
 
 export type CartoColormap = keyof typeof CARTO_PALETTES;
