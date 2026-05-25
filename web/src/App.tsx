@@ -111,27 +111,11 @@ const STAC_BBOX: [number, number, number, number] = [
 // can't enumerate thousands of COGs. Matches geocode.ts's maxSpanDeg.
 const MAX_VIEWPORT_SPAN_DEG = 5.0;
 
-// Budgeted-extent 10 m terrain on zoom-out (the "min zoom problem").
-// Mapterhorn's usgs3dep13 (10 m) exists only at z13+; tileSize:256 makes the
-// viewport pull z13 natively from ~mapZoom 12. Below that, deck falls to z12-
-// (glo30 30 m) and the relief crumples. To hold 10 m as you pull back, we set
-// the TerrainLayer's inner TileLayer minZoom:13 + an `extent` (deck only does
-// the overzoom-clamp-UP when extent is set — deck.gl#7586), so z13 tiles render
-// across a zoomed-out frame. Cost is geometric (each level out ≈ 4× tiles), so:
-//   - only within the [MIN, MAX) map-zoom BAND (hold 10 m down to z10),
-//   - and only within a camera-centered extent box sized to COVER the frame
-//     (capped so pitch can't fan it unbounded). Beyond the box → natural LOD.
-// The detail tiles range-read from source.coop PMTiles (terrain/mapterhornPmtiles
-// + the TerrainLayer `fetch` below), which dodges the per-tile maxRequests=6
-// bottleneck — that's what makes the larger box / z10 floor actually settle.
-const TERRAIN_DETAIL_MIN_MAPZOOM = 10; // band floor — below this, no forcing.
-// (z10 now holds because detail tiles range-read from PMTiles settle fast.)
-const TERRAIN_DETAIL_MAX_MAPZOOM = 12.5; // above this, z13 is already native
-const TERRAIN_DETAIL_DEM_Z = 13; // the 10 m source floor we clamp tiles up to
-const TERRAIN_EXTENT_MAX_HALF_DEG = 1.5; // box must COVER the zoomed-out frame so
-// nothing renders flat outside it (the old 0.6° box left the z10 frame mostly
-// flat). Still capped so pitch's horizon-balloon getBounds() can't fan unbounded;
-// PMTiles range-reads make the larger z13 tile count affordable.
+// SPECIALTY VIZ: no extent/minZoom box. Terrain renders at natural LOD across the
+// whole frame for clean, dramatic, collapse-free shots — glo30 (30 m) when wide,
+// 10 m PMTiles as you push in past ~z12 (tileSize:256 shifts the fetched tile-zoom
+// one deeper). The 10 m-everywhere-on-zoom-out build is on branch
+// terrain-pmtiles-source-coop (it traded a flat box-edge collapse for the detail).
 
 // Imagery accumulates across pans (so tiles don't drop when you move) — but
 // unbounded growth = unbounded open COGs / decoded textures. Cap the retained
@@ -248,11 +232,6 @@ export default function App() {
   // PAUSE freezes the move-driven auto-behaviors (imagery fetch + ground re-
   // leveling) so you can pan/tilt freely without the map reloading under you.
   const [paused, setPaused] = useState<boolean>(false);
-  // Camera-centered box where we force 10 m (z13) terrain on zoom-out. null =
-  // no forcing (natural LOD). Recomputed on settle only — see updateTerrainExtent.
-  const [terrainExtent, setTerrainExtent] = useState<
-    [number, number, number, number] | null
-  >(null);
   // Base granularity unit; the actual quantum scales with zoom (computed in
   // updateGroundBase) so a tight view re-levels finely and a wide view coarsely.
   const GROUND_QUANTUM_BASE_M = 125;
@@ -330,23 +309,22 @@ export default function App() {
       tileSize: 256,
       maxZoom: 17,
       // Detail tiles now range-read from PMTiles (coalesced), so the default 6 is
-      // overly cautious — let more meshing run in parallel so a zoomed-out frame
-      // of z13 tiles actually settles.
+      // overly cautious — let more meshing run in parallel so the frame settles.
       maxRequests: 20,
-      // Budgeted 10 m hold on zoom-out: when terrainExtent is set (map zoom is in
-      // the detail band, see updateTerrainExtent), clamp the inner TileLayer to
-      // z13+ within that tight box so the frame keeps 10 m instead of crumpling
-      // into glo30. null → omit both, leaving natural LOD everywhere.
-      ...(terrainExtent
-        ? { extent: terrainExtent, minZoom: TERRAIN_DETAIL_DEM_Z }
-        : {}),
+      // SPECIALTY VIZ: no `extent`/`minZoom` clip. The terrain renders at NATURAL
+      // LOD across the WHOLE frame — full relief shape everywhere, no flat
+      // box-edge collapse (the collapse was the cost of forcing 10 m on zoom-out).
+      // Wide views read glo30 (30 m) — smooth + dramatic; pushing in past ~z12
+      // crosses into 10 m PMTiles automatically (tileSize:256 shifts the fetched
+      // tile-zoom one level deeper). The min-zoom 10 m-everywhere build lives on
+      // branch terrain-pmtiles-source-coop.
       // Clamping loader kills the nodata "needle" spikes the stock terrarium
       // decoder leaves in (Mapterhorn WebP nodata at water/edges). See
       // raster/clampedTerrainLoader.ts.
       loaders: [ClampedTerrainLoader],
       beforeId: labelBeforeId,
     } as any);
-  }, [terrainActive, exaggeration, terrainBaseM, labelBeforeId, terrainExtent]);
+  }, [terrainActive, exaggeration, terrainBaseM, labelBeforeId]);
 
   // Mirror the module-level load scoreboard into React state.
   useEffect(() => subscribeStats(setStats), []);
@@ -590,39 +568,6 @@ export default function App() {
     // Force a fresh array even if value-identical so the STAC effect re-runs
     // (its dep is the bbox reference) — that's the actual retry.
     setBbox([next[0], next[1], next[2], next[3]]);
-  };
-
-  // Recompute the 10 m-detail box for the current camera. Called on settle only
-  // (moveEnd / load), never mid-pan, so the z13 fan-out isn't rebuilt while
-  // navigating. Outside the [MIN, MAX) zoom band we clear it (null) so terrain
-  // uses natural LOD: native z13 when zoomed in, glo30 when far out, no box clip.
-  const updateTerrainExtent = () => {
-    const map = mapRef.current?.getMap();
-    if (!map) return;
-    const z = map.getZoom();
-    if (z < TERRAIN_DETAIL_MIN_MAPZOOM || z >= TERRAIN_DETAIL_MAX_MAPZOOM) {
-      setTerrainExtent((prev) => (prev === null ? prev : null));
-      return;
-    }
-    const b = map.getBounds();
-    const c = map.getCenter();
-    // Camera-centered (not bbox-centered) and half-span-capped, same reasoning as
-    // handleFetchViewport: under pitch getBounds() is a horizon-skewed trapezoid,
-    // so anchor on what's actually being looked at and cap the box size.
-    const halfW = Math.min(
-      (b.getEast() - b.getWest()) / 2,
-      TERRAIN_EXTENT_MAX_HALF_DEG,
-    );
-    const halfH = Math.min(
-      (b.getNorth() - b.getSouth()) / 2,
-      TERRAIN_EXTENT_MAX_HALF_DEG,
-    );
-    setTerrainExtent([
-      c.lng - halfW,
-      c.lat - halfH,
-      c.lng + halfW,
-      c.lat + halfH,
-    ]);
   };
 
   // Snap the map back to plan view: bearing → north, pitch → flat.
@@ -880,7 +825,6 @@ export default function App() {
           if (paused) return; // frozen: no auto-fetch / re-leveling on move
           if (!drawing && e.originalEvent) handleFetchViewport();
           if (groundLevel) updateGroundBase();
-          updateTerrainExtent();
         }}
         // attributionControl={false}  // comment out to re-enable the (i) badge bottom-right
         attributionControl={false}
@@ -913,7 +857,6 @@ export default function App() {
           // before mapRef was ready). Defaults on, so the opening view lands with
           // high terrain already dropped toward z=0.
           if (groundLevel) updateGroundBase();
-          updateTerrainExtent();
         }}
       >
         <DeckGLOverlay layers={layers} onDevice={setDevice} />
