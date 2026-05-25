@@ -109,6 +109,13 @@ const STAC_BBOX: [number, number, number, number] = [
 // can't enumerate thousands of COGs. Matches geocode.ts's maxSpanDeg.
 const MAX_VIEWPORT_SPAN_DEG = 5.0;
 
+// Imagery accumulates across pans (so tiles don't drop when you move) — but
+// unbounded growth = unbounded open COGs / decoded textures. Cap the retained
+// item set; when a pan would exceed it, evict the items whose centers are
+// farthest from the current view before adding the new ones. Tuned for "a
+// handful of viewports' worth" of 10 m S2 composites.
+const MAX_ACCUM_ITEMS = 60;
+
 // Items are ANNUAL composites (`YYYY-01-01_YYYY+1-01-01`). A full-year query
 // also matches the adjacent years' annuals at the Jan-1 boundary, so a tile can
 // come back as two overlapping composites. We KEEP that overlap on purpose: a
@@ -152,6 +159,11 @@ export default function App() {
   const sourcesCache = useRef(new Map<string, Record<string, { url: string }>>());
   const modeGen = useRef(0);
   const prevMode = useRef<RenderMode | null>(null);
+  // Track the last year a STAC fetch ran for. A year change means a totally
+  // different imagery set (replace + clear). A bbox change (pan/zoom) keeps the
+  // year, so we MERGE the new items into what's already loaded instead of
+  // wiping — that's what stops tiles dropping off when the map moves.
+  const prevFetchYear = useRef<number | null>(null);
   // One AbortController per generation. Aborting on mode switch kills the
   // old mode's in-flight band fetches so they stop hogging the (maxRequests-
   // capped) scheduler — otherwise a backlog of pending NDVI reads can starve
@@ -159,6 +171,11 @@ export default function App() {
   const genAbort = useRef<AbortController | null>(null);
   const [labelBeforeId, setLabelBeforeId] = useState<string | undefined>(undefined);
   const [stacItems, setStacItems] = useState<PartialSTACItem[]>([]);
+  // Mirror of stacItems for reads inside async callbacks (the fetch .then runs
+  // with a stale closure). Used to decide whether an empty STAC page over a new
+  // pan should surface the "no imagery" error — it shouldn't if we still have
+  // accumulated tiles on screen.
+  const stacItemsRef = useRef<PartialSTACItem[]>([]);
   const [stacError, setStacError] = useState<string | null>(null);
   const [mode, setMode] = useState<RenderMode>("rgb");
   // Look/selection prefs are seeded from localStorage so a reload keeps the
@@ -351,29 +368,72 @@ export default function App() {
 
   // Fresh scoreboard whenever the source set changes (AOI / year) or the render
   // mode switches — stale per-AOI counts would otherwise carry over.
-  useEffect(() => resetStats(), [bbox, year, mode]);
+  useEffect(() => {
+    stacItemsRef.current = stacItems;
+  }, [stacItems]);
+
+  // Reset the load scoreboard on year/mode change (a fresh source set). A bbox
+  // pan no longer resets it: imagery now accumulates, so the counts should
+  // accumulate too rather than zeroing every move.
+  useEffect(() => resetStats(), [year, mode]);
 
   useEffect(() => {
     const ac = new AbortController();
-    // Clear stacItems on AOI/year change. This isn't just cosmetic: the
-    // MosaicLayer's spatial index (Flatbush) is rebuilt from `sources`, and
-    // deck.gl-geotiff's getTileIndices does `sources[i]` UNGUARDED. If a new,
-    // shorter source list arrives while the old (longer) index is still live,
-    // `sources[i]` is undefined → "Cannot read properties of undefined (id)"
-    // crash-spam. Routing through [] resets the index to null and avoids the
-    // mismatch. (Brief blink on a real AOI/year change — infrequent given the
-    // 50% fetch buffer; correctness > the no-blink nicety.)
-    setStacItems([]);
+    // A year change swaps the entire imagery set, so clear first. A bbox change
+    // (pan/zoom) keeps the year — MERGE new items into the loaded set so tiles
+    // already on screen stay put. The clear-to-[] still matters on a year swap:
+    // MosaicLayer rebuilds its Flatbush index from `sources`, and
+    // deck.gl-geotiff's getTileIndices does `sources[i]` UNGUARDED — a new,
+    // shorter list arriving while the old (longer) index is live reads
+    // undefined → "Cannot read properties of undefined (id)" crash-spam.
+    // Routing through [] resets the index to null. The merge path only ever
+    // GROWS the list (union by id), so the index stays valid — no clear, no
+    // blink. The only shrink is cap-eviction, which goes through [] explicitly.
+    // Replace (not merge) until a fetch for THIS year actually completes.
+    // prevFetchYear is advanced in .then on success — never here — so startup's
+    // rapid bbox changes (each aborts the prior fetch) can't strand us in the
+    // merge path against an empty set. The year-swap clear-to-[] (Flatbush
+    // safety) happens every replace run; harmless when already empty.
+    const yearChanged = prevFetchYear.current !== year;
+    if (yearChanged) setStacItems([]);
     setStacError(null);
+    // Capture the view center now so eviction (if we exceed the cap) drops the
+    // items farthest from where the user actually is.
+    const map = mapRef.current?.getMap();
+    const center = map?.getCenter();
+    const cx = center?.lng ?? (bbox[0] + bbox[2]) / 2;
+    const cy = center?.lat ?? (bbox[1] + bbox[3]) / 2;
     // Debounce: rapid bbox changes (draw-tool drags, repeated searches) would
     // otherwise kick off overlapping /search paginations against the public
     // STAC API. Wait for the AOI to settle before fetching.
     const t = setTimeout(() => {
       fetchStacItems({ datetime: yearToDatetime(year), bbox, signal: ac.signal })
         .then(({ items, rejected }) => {
-          setStacItems(items);
-          console.info(`[stac] ${items.length} items for ${year} (${rejected} CORS-blocked)`);
-          if (items.length === 0) {
+          console.info(
+            `[stac] ${items.length} items for ${year} (${rejected} CORS-blocked)`,
+          );
+          setStacItems((prev) => {
+            // Year swap already cleared prev → just take the fresh page.
+            const base = yearChanged ? [] : prev;
+            const byId = new Map(base.map((it) => [it.id, it]));
+            for (const it of items) byId.set(it.id, it);
+            let merged = Array.from(byId.values());
+            // Cap retained items for memory: keep the MAX_ACCUM_ITEMS closest
+            // to the current view, drop the rest.
+            if (merged.length > MAX_ACCUM_ITEMS) {
+              const d2 = (it: PartialSTACItem) => {
+                const mx = (it.bbox[0] + it.bbox[2]) / 2;
+                const my = (it.bbox[1] + it.bbox[3]) / 2;
+                return (mx - cx) ** 2 + (my - cy) ** 2;
+              };
+              merged = merged.sort((a, b) => d2(a) - d2(b)).slice(0, MAX_ACCUM_ITEMS);
+            }
+            return merged;
+          });
+          // Advance the gate only now, on a completed fetch — so an aborted
+          // startup fetch never strands us in the merge path.
+          prevFetchYear.current = year;
+          if (items.length === 0 && (yearChanged || stacItemsRef.current.length === 0)) {
             setStacError(
               rejected > 0
                 ? `No CORS-open imagery here — ${rejected} item${rejected > 1 ? "s" : ""} exist but are on a CORS-blocked host. Try the Americas or Europe.`
@@ -419,8 +479,11 @@ export default function App() {
     let n = b.getNorth();
     // Fetch a bbox much larger than the visible view so there's real pan
     // headroom: with a tight buffer, every small pan pushed the view past the
-    // loaded edge and refetched (the "reloads on every move"). 50% on each side
-    // ≈ 2× the viewport span, so you can pan/zoom a fair bit before it refetches.
+    // loaded edge and refetched (the "reloads on every move"). Imagery is cheap
+    // (10 m TCI COGs, accumulated + capped at MAX_ACCUM_ITEMS). 50% on each
+    // side ≈ 2× the viewport span — a screen of pre-loaded margin before a pan
+    // trips a refetch, without opening ~9× the COG area at once (the 100%/3×
+    // version was a big chunk of the "super slow" startup).
     const margin = 0.5;
     const dw = (e - w) * margin;
     const dh = (n - s) * margin;
