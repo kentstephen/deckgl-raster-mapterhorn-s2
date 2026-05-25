@@ -115,6 +115,12 @@ const MAX_VIEWPORT_SPAN_DEG = 5.0;
 // box accepts a custom value up to this cap for dramatic relief.
 const ELEVATION_SCALE_MAX = 10;
 
+// Terrain skirt apron in REAL meters (multiplied by exaggeration at use). Hides
+// hairline cracks between adjacent terrain tiles. Default TerrainLayer skirt
+// (meshMaxError*2 ≈ a few m) is too short. Tune: raise if cracks remain, lower
+// if dark aprons flash at steep tile edges.
+const TERRAIN_SKIRT_M = 80;
+
 // SPECIALTY VIZ: no extent/minZoom box. Terrain renders at natural LOD across the
 // whole frame for clean, dramatic, collapse-free shots — glo30 (30 m) when wide,
 // 10 m PMTiles as you push in past ~z12 (tileSize:256 shifts the fetched tile-zoom
@@ -305,6 +311,13 @@ export default function App() {
       operation: "terrain+draw" as any,
       meshMaxError: 4,
       color: [38, 42, 46],
+      // Seam fix: TerrainLayer's default skirt is meshMaxError*2 (~8 decoded
+      // units ≈ a few meters), too short to hide the cracks between independently
+      // despeckled tiles. Override with a taller apron. Skirt is in decoded z
+      // units (= realMeters × k), so scale the real-meter target by k so it stays
+      // constant in real meters across exaggeration. Tune TERRAIN_SKIRT_M if dark
+      // aprons flash at steep tile edges (lower) or cracks remain (raise).
+      loadOptions: { terrain: { skirtHeight: TERRAIN_SKIRT_M * k } },
       // Mapterhorn's 10 m usgs3dep13 exists ONLY at z13+ (z12 and below = 30 m
       // glo30, which crumples). The inner TileLayer derives the fetched tile-zoom
       // from the viewport zoom; tileSize:256 (vs the 512 default) shifts that one
