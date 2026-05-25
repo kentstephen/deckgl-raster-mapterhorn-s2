@@ -9,7 +9,9 @@ import {
   DEFAULT_NDVI_RANGE,
   DEFAULT_NDVI_SCALE,
   INDEX_COLORMAPS,
+  INDEX_KEYS,
   type NdviColormap,
+  type RenderMode,
 } from "./renderPipeline";
 
 const KEY = "s2cog.colorPrefs.v1";
@@ -25,6 +27,12 @@ export type ColorPrefs = {
   smoothing: boolean;
   // Selected mosaic year. App validates against AVAILABLE_YEARS on load.
   year: number;
+  // Render mode (rgb / a spectral index).
+  mode: RenderMode;
+  // Terrain knobs — saved so a crafted view comes back on reload.
+  terrainEnabled: boolean;
+  exaggeration: number; // "elevation scale" in the UI
+  groundLevel: boolean;
 };
 
 export const DEFAULT_COLOR_PREFS: ColorPrefs = {
@@ -35,7 +43,13 @@ export const DEFAULT_COLOR_PREFS: ColorPrefs = {
   ndviReversed: false,
   smoothing: false,
   year: 2023,
+  mode: "rgb",
+  terrainEnabled: true,
+  exaggeration: 1,
+  groundLevel: true,
 };
+
+const VALID_MODES: readonly string[] = ["rgb", ...INDEX_KEYS];
 
 const num = (v: unknown, fallback: number) =>
   typeof v === "number" && Number.isFinite(v) ? v : fallback;
@@ -56,6 +70,10 @@ export function loadColorPrefs(): ColorPrefs {
         ? (p.ndviColormap as NdviColormap)
         : DEFAULT_NDVI_COLORMAP;
     const r = Array.isArray(p.ndviRange) ? p.ndviRange : DEFAULT_NDVI_RANGE;
+    const mode =
+      typeof p.mode === "string" && VALID_MODES.includes(p.mode)
+        ? (p.mode as RenderMode)
+        : "rgb";
     return {
       rgbGain: num(p.rgbGain, DEFAULT_RGB_GAIN),
       ndviColormap: cmap,
@@ -64,6 +82,11 @@ export function loadColorPrefs(): ColorPrefs {
       ndviReversed: p.ndviReversed === true,
       smoothing: p.smoothing === true,
       year: num(p.year, 2023),
+      mode,
+      // Back-compat: older stored prefs lack these → fall to defaults (terrain on).
+      terrainEnabled: p.terrainEnabled !== false,
+      exaggeration: num(p.exaggeration, 1),
+      groundLevel: p.groundLevel !== false,
     };
   } catch {
     return DEFAULT_COLOR_PREFS;

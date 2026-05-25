@@ -19,7 +19,7 @@ import type { GeoTIFF } from "@developmentseed/geotiff";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import type { Device, Texture } from "@luma.gl/core";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Map as MaplibreMap,
   Marker,
@@ -111,6 +111,10 @@ const STAC_BBOX: [number, number, number, number] = [
 // can't enumerate thousands of COGs. Matches geocode.ts's maxSpanDeg.
 const MAX_VIEWPORT_SPAN_DEG = 5.0;
 
+// Elevation scale (vertical exaggeration): the slider runs 0–3, but the numeric
+// box accepts a custom value up to this cap for dramatic relief.
+const ELEVATION_SCALE_MAX = 10;
+
 // SPECIALTY VIZ: no extent/minZoom box. Terrain renders at natural LOD across the
 // whole frame for clean, dramatic, collapse-free shots — glo30 (30 m) when wide,
 // 10 m PMTiles as you push in past ~z12 (tileSize:256 shifts the fetched tile-zoom
@@ -185,10 +189,10 @@ export default function App() {
   // accumulated tiles on screen.
   const stacItemsRef = useRef<PartialSTACItem[]>([]);
   const [stacError, setStacError] = useState<string | null>(null);
-  const [mode, setMode] = useState<RenderMode>("rgb");
-  // Look/selection prefs are seeded from localStorage so a reload keeps the
-  // user's choices until they change them (persisted by the effect below).
+  // Look/selection/terrain prefs are seeded from localStorage so a reload keeps
+  // the user's choices. Persisted explicitly via the SAVE SETTINGS button.
   const initialPrefs = useRef(loadColorPrefs()).current;
+  const [mode, setMode] = useState<RenderMode>(initialPrefs.mode);
   const [year, setYear] = useState<number>(
     (AVAILABLE_YEARS as readonly number[]).includes(initialPrefs.year)
       ? initialPrefs.year
@@ -219,15 +223,15 @@ export default function App() {
   // RGB texture magnification: false = nearest (blocky, honest 10 m pixels),
   // true = linear (smooth interpolation past native zoom). Experiment toggle.
   const [smoothing, setSmoothing] = useState<boolean>(initialPrefs.smoothing);
-  // Terrain controls. `terrainEnabled=false` = flat (no DEM lift). Exaggeration
-  // multiplies real elevation in the mesh (1 = true scale).
-  const [terrainEnabled, setTerrainEnabled] = useState<boolean>(true);
-  const [exaggeration, setExaggeration] = useState<number>(1);
+  // Terrain controls. `terrainEnabled=false` = flat (no DEM lift). Elevation
+  // scale (exaggeration) multiplies real elevation in the mesh (1 = true scale).
+  const [terrainEnabled, setTerrainEnabled] = useState<boolean>(initialPrefs.terrainEnabled);
+  const [exaggeration, setExaggeration] = useState<number>(initialPrefs.exaggeration);
   // "Ground level": subtract the in-view base elevation from the terrain so high-
   // altitude terrain sits near z=0 (manageable camera/zoom + less extruded-tile
   // culling at frame edges). terrainBaseM is the subtracted base (real meters),
   // quantized to a band so panning within it doesn't reload the terrain.
-  const [groundLevel, setGroundLevel] = useState<boolean>(true);
+  const [groundLevel, setGroundLevel] = useState<boolean>(initialPrefs.groundLevel);
   const [terrainBaseM, setTerrainBaseM] = useState<number>(0);
   // PAUSE freezes the move-driven auto-behaviors (imagery fetch + ground re-
   // leveling) so you can pan/tilt freely without the map reloading under you.
@@ -332,10 +336,44 @@ export default function App() {
   // Mirror captured console errors/warnings into state for the in-panel log.
   useEffect(() => subscribeConsole(setLogs), []);
 
-  // Persist color/look prefs whenever they change, so they survive a reload.
-  useEffect(() => {
-    saveColorPrefs({ rgbGain, ndviColormap, ndviRange, ndviScale, ndviReversed, smoothing, year });
-  }, [rgbGain, ndviColormap, ndviRange, ndviScale, ndviReversed, smoothing, year]);
+  // Explicit save (SAVE SETTINGS button): persist the current look + terrain
+  // settings so a reload comes back. `savedFlash` flips the button label briefly.
+  const [savedFlash, setSavedFlash] = useState(false);
+  const handleSaveSettings = () => {
+    saveColorPrefs({
+      rgbGain,
+      ndviColormap,
+      ndviRange,
+      ndviScale,
+      ndviReversed,
+      smoothing,
+      year,
+      mode,
+      terrainEnabled,
+      exaggeration,
+      groundLevel,
+    });
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 1400);
+  };
+
+  // RESET VIEW (also Cmd/Ctrl+Y): reload the imagery shown for the CURRENT view —
+  // does NOT move the camera, change the AOI/what's in view, or touch any setting.
+  // Clears the loaded imagery + the per-source cache, bumps the layer generation
+  // (fresh ids → full rebuild, no stale tile cache), and re-triggers the STAC
+  // fetch for the current bbox (prevFetchYear=null → clean replace, not merge).
+  const handleResetData = useCallback(() => {
+    sourcesCache.current.clear();
+    modeGen.current += 1;
+    genAbort.current?.abort();
+    genAbort.current = new AbortController();
+    prevFetchYear.current = null;
+    setStacError(null);
+    setStacItems([]);
+    setBbox(
+      (b) => [b[0], b[1], b[2], b[3]] as [number, number, number, number],
+    );
+  }, []);
 
   // Keyboard shortcuts (core set). Letter keys are ignored while typing in an
   // input/select; Esc works everywhere (also blurs/clears via the field's own
@@ -349,6 +387,12 @@ export default function App() {
           t.tagName === "TEXTAREA" ||
           t.tagName === "SELECT" ||
           t.isContentEditable);
+      // Cmd/Ctrl+Y: reload the data shown for the current view (no camera change).
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        if (!typing) handleResetData();
+        return;
+      }
       if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
       switch (e.key.toLowerCase()) {
         case "/":
@@ -369,7 +413,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [marker]);
+  }, [marker, handleResetData]);
 
   const mapStyle = labels
     ? "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json"
@@ -573,17 +617,6 @@ export default function App() {
   // Snap the map back to plan view: bearing → north, pitch → flat.
   const handleResetNorth = () => {
     mapRef.current?.getMap()?.easeTo({ bearing: 0, pitch: 0, duration: 400 });
-  };
-
-  // Reset the map to the default view (saved home view, else the hardcoded one).
-  const handleResetView = () => {
-    mapRef.current?.getMap()?.easeTo({
-      center: [initialViewState.longitude, initialViewState.latitude],
-      zoom: initialViewState.zoom,
-      pitch: initialViewState.pitch,
-      bearing: initialViewState.bearing,
-      duration: 600,
-    });
   };
 
   // Sample the in-view ground elevation and set the (quantized) terrain base so
@@ -910,7 +943,9 @@ export default function App() {
         onFetchViewport={() => handleFetchViewport(true)}
         onResetNorth={handleResetNorth}
         onSetDefaultView={handleSetDefaultView}
-        onResetView={handleResetView}
+        onResetView={handleResetData}
+        onSaveSettings={handleSaveSettings}
+        savedFlash={savedFlash}
         paused={paused}
         onTogglePause={() => setPaused((v) => !v)}
         zoom={zoom}
@@ -1101,6 +1136,8 @@ function InfoPanel({
   onResetNorth,
   onSetDefaultView,
   onResetView,
+  onSaveSettings,
+  savedFlash,
   paused,
   onTogglePause,
   zoom,
@@ -1147,6 +1184,8 @@ function InfoPanel({
   onResetNorth: () => void;
   onSetDefaultView: () => void;
   onResetView: () => void;
+  onSaveSettings: () => void;
+  savedFlash: boolean;
   paused: boolean;
   onTogglePause: () => void;
   zoom: number;
@@ -1327,11 +1366,18 @@ function InfoPanel({
             SET DEFAULT
           </Toggle>
           <Toggle
+            active={savedFlash}
+            onClick={onSaveSettings}
+            title="Save the current render + terrain settings (mode, colormap, elevation scale, etc.) so they persist on reload"
+          >
+            {savedFlash ? "SAVED ✓" : "SAVE SETTINGS"}
+          </Toggle>
+          <Toggle
             active={false}
             onClick={onResetView}
-            title="Reset the map to the default view"
+            title="Reload the imagery shown for the current view (Cmd/Ctrl+Y) — doesn't move the camera or change settings"
           >
-            RESET
+            RESET VIEW
           </Toggle>
           <Toggle
             active={paused}
@@ -1561,12 +1607,22 @@ function InfoPanel({
             {terrainEnabled && (
               <>
                 <Slider
-                  label="exaggeration"
+                  label="elevation scale"
                   value={exaggeration}
                   min={0}
                   max={3}
                   onChange={onExaggerationChange}
                   onReset={() => onExaggerationChange(1)}
+                  // Slider caps at 3; the numeric box takes a custom value up to
+                  // ELEVATION_SCALE_MAX (values >3 pin the slider thumb at max).
+                  box={
+                    <NumBox
+                      value={exaggeration}
+                      min={0}
+                      max={ELEVATION_SCALE_MAX}
+                      onChange={onExaggerationChange}
+                    />
+                  }
                 />
                 <div
                   style={{
