@@ -109,6 +109,24 @@ const STAC_BBOX: [number, number, number, number] = [
 // can't enumerate thousands of COGs. Matches geocode.ts's maxSpanDeg.
 const MAX_VIEWPORT_SPAN_DEG = 5.0;
 
+// Budgeted-extent 10 m terrain on zoom-out (the "min zoom problem").
+// Mapterhorn's usgs3dep13 (10 m) exists only at z13+; tileSize:256 makes the
+// viewport pull z13 natively from ~mapZoom 12. Below that, deck falls to z12-
+// (glo30 30 m) and the relief crumples. To hold 10 m as you pull back, we set
+// the TerrainLayer's inner TileLayer minZoom:13 + an `extent` (deck only does
+// the overzoom-clamp-UP when extent is set — deck.gl#7586), so z13 tiles render
+// across a zoomed-out frame. Cost is geometric (each level out ≈ 4× tiles), so:
+//   - only within the [MIN, MAX) map-zoom BAND (2 levels: hold 10 m down to z11),
+//   - and only within a TIGHT camera-centered extent box (not the 5° imagery
+//     AOI, not CONUS — that was the reverted attempt that fanned out to ~12k
+//     z13 tiles). Beyond the box the far background uses natural LOD / glo30.
+const TERRAIN_DETAIL_MIN_MAPZOOM = 11; // band floor — below this, no forcing
+// (tried 10; relief didn't hold there, so 11 is the working floor)
+const TERRAIN_DETAIL_MAX_MAPZOOM = 12.5; // above this, z13 is already native
+const TERRAIN_DETAIL_DEM_Z = 13; // the 10 m source floor we clamp tiles up to
+const TERRAIN_EXTENT_MAX_HALF_DEG = 0.6; // caps the box under pitch (getBounds
+// balloons toward the horizon); ~1.2° box ≈ a few hundred z13 tiles, bounded.
+
 // Imagery accumulates across pans (so tiles don't drop when you move) — but
 // unbounded growth = unbounded open COGs / decoded textures. Cap the retained
 // item set; when a pan would exceed it, evict the items whose centers are
@@ -224,6 +242,11 @@ export default function App() {
   // PAUSE freezes the move-driven auto-behaviors (imagery fetch + ground re-
   // leveling) so you can pan/tilt freely without the map reloading under you.
   const [paused, setPaused] = useState<boolean>(false);
+  // Camera-centered box where we force 10 m (z13) terrain on zoom-out. null =
+  // no forcing (natural LOD). Recomputed on settle only — see updateTerrainExtent.
+  const [terrainExtent, setTerrainExtent] = useState<
+    [number, number, number, number] | null
+  >(null);
   // Base granularity unit; the actual quantum scales with zoom (computed in
   // updateGroundBase) so a tight view re-levels finely and a wide view coarsely.
   const GROUND_QUANTUM_BASE_M = 125;
@@ -271,13 +294,20 @@ export default function App() {
       // more terrain tiles fetched/meshed per screen. maxZoom:17 = endpoint cap.
       tileSize: 256,
       maxZoom: 17,
+      // Budgeted 10 m hold on zoom-out: when terrainExtent is set (map zoom is in
+      // the detail band, see updateTerrainExtent), clamp the inner TileLayer to
+      // z13+ within that tight box so the frame keeps 10 m instead of crumpling
+      // into glo30. null → omit both, leaving natural LOD everywhere.
+      ...(terrainExtent
+        ? { extent: terrainExtent, minZoom: TERRAIN_DETAIL_DEM_Z }
+        : {}),
       // Clamping loader kills the nodata "needle" spikes the stock terrarium
       // decoder leaves in (Mapterhorn WebP nodata at water/edges). See
       // raster/clampedTerrainLoader.ts.
       loaders: [ClampedTerrainLoader],
       beforeId: labelBeforeId,
     } as any);
-  }, [terrainActive, exaggeration, terrainBaseM, labelBeforeId]);
+  }, [terrainActive, exaggeration, terrainBaseM, labelBeforeId, terrainExtent]);
 
   // Mirror the module-level load scoreboard into React state.
   useEffect(() => subscribeStats(setStats), []);
@@ -325,8 +355,8 @@ export default function App() {
   }, [marker]);
 
   const mapStyle = labels
-    ? "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
-    : "https://basemaps.cartocdn.com/gl/positron-nolabels-gl-style/style.json";
+    ? "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json"
+    : "https://basemaps.cartocdn.com/gl/voyager-nolabels-gl-style/style.json";
 
   // Bump a generation on mode change so the MosaicLayer/MultiCOGLayer ids
   // change, forcing deck.gl to fully unmount the old mode's layer tree
@@ -521,6 +551,39 @@ export default function App() {
     // Force a fresh array even if value-identical so the STAC effect re-runs
     // (its dep is the bbox reference) — that's the actual retry.
     setBbox([next[0], next[1], next[2], next[3]]);
+  };
+
+  // Recompute the 10 m-detail box for the current camera. Called on settle only
+  // (moveEnd / load), never mid-pan, so the z13 fan-out isn't rebuilt while
+  // navigating. Outside the [MIN, MAX) zoom band we clear it (null) so terrain
+  // uses natural LOD: native z13 when zoomed in, glo30 when far out, no box clip.
+  const updateTerrainExtent = () => {
+    const map = mapRef.current?.getMap();
+    if (!map) return;
+    const z = map.getZoom();
+    if (z < TERRAIN_DETAIL_MIN_MAPZOOM || z >= TERRAIN_DETAIL_MAX_MAPZOOM) {
+      setTerrainExtent((prev) => (prev === null ? prev : null));
+      return;
+    }
+    const b = map.getBounds();
+    const c = map.getCenter();
+    // Camera-centered (not bbox-centered) and half-span-capped, same reasoning as
+    // handleFetchViewport: under pitch getBounds() is a horizon-skewed trapezoid,
+    // so anchor on what's actually being looked at and cap the box size.
+    const halfW = Math.min(
+      (b.getEast() - b.getWest()) / 2,
+      TERRAIN_EXTENT_MAX_HALF_DEG,
+    );
+    const halfH = Math.min(
+      (b.getNorth() - b.getSouth()) / 2,
+      TERRAIN_EXTENT_MAX_HALF_DEG,
+    );
+    setTerrainExtent([
+      c.lng - halfW,
+      c.lat - halfH,
+      c.lng + halfW,
+      c.lat + halfH,
+    ]);
   };
 
   // Snap the map back to plan view: bearing → north, pitch → flat.
@@ -778,6 +841,7 @@ export default function App() {
           if (paused) return; // frozen: no auto-fetch / re-leveling on move
           if (!drawing && e.originalEvent) handleFetchViewport();
           if (groundLevel) updateGroundBase();
+          updateTerrainExtent();
         }}
         // attributionControl={false}  // comment out to re-enable the (i) badge bottom-right
         attributionControl={false}
@@ -810,6 +874,7 @@ export default function App() {
           // before mapRef was ready). Defaults on, so the opening view lands with
           // high terrain already dropped toward z=0.
           if (groundLevel) updateGroundBase();
+          updateTerrainExtent();
         }}
       >
         <DeckGLOverlay layers={layers} onDevice={setDevice} />
