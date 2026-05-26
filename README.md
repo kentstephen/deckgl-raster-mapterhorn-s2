@@ -18,9 +18,10 @@ Two layers stacked by deck.gl, rendered interleaved into MapLibre's WebGL canvas
 1. **A terrain surface** — deck's `TerrainLayer` fetches
    [Mapterhorn](https://mapterhorn.com) DEM tiles (elevation encoded as RGB),
    decodes them to heights, and builds a 3D mesh. A **custom `fetch`** reads the
-   tiles itself: the coarse base (≤z12) from Mapterhorn's xyz endpoint, and the
-   **10 m detail (≥z13) directly from Mapterhorn's regional PMTiles archives on
-   Source Cooperative** via HTTP range reads — see "Terrain fetch" below.
+   tiles itself, **entirely from Mapterhorn's PMTiles archives on Source
+   Cooperative** via HTTP range reads: the global 30 m base (≤z12) from
+   `planet.pmtiles`, and **hi-res detail (≥z13, ≤10 m) from the regional
+   archives** where they exist — worldwide. See "Terrain fetch" below.
 2. **The imagery** — deck.gl-raster reads Sentinel-2 COGs and renders them.
    Adding deck's **`TerrainExtension`** in `'drape'` mode makes that imagery a
    **texture painted onto the terrain mesh**, so it follows every ridge and
@@ -34,7 +35,8 @@ Sentinel-2 COG ──► deck.gl-raster ──┐
  (source.coop)                       ├─► TerrainExtension('drape')
                                      │        │ paints imagery onto…
 Mapterhorn DEM ──► TerrainLayer ─────┘        ▼
- ≤z12 xyz · ≥z13 PMTiles (source.coop)  the terrain mesh ──► MapLibre canvas
+ PMTiles (source.coop):                 the terrain mesh ──► MapLibre canvas
+ ≤z12 planet 30 m · ≥z13 regional ≤10 m
 ```
 
 > **Why "drape" matters:** deck.gl-raster renders imagery as an *instanced* mesh,
@@ -51,8 +53,8 @@ Mapterhorn DEM ──► TerrainLayer ─────┘        ▼
 | What | Where | Notes |
 |------|-------|-------|
 | **Imagery** | Earth Genome Sentinel-2 Temporal Mosaics on [Source Cooperative](https://source.coop/earthgenome/sentinel2-temporal-mosaics) | Native **10 m**. Annual composites; a precomposed 8-bit "TCI" true-color COG per tile. CORS-open years: 2022–2024. |
-| **Elevation (detail ≥z13)** | Mapterhorn regional PMTiles on [Source Cooperative](https://source.coop/mapterhorn/mapterhorn) (`…/mapterhorn/mapterhorn/{6-x-y}.pmtiles`) | Terrarium WebP, **10 m USGS 3DEP** over CONUS. Read directly via HTTP range requests (CORS-open). One archive per ~622 km z6 region. |
-| **Elevation (base ≤z12)** | Mapterhorn `https://tiles.mapterhorn.com/{z}/{x}/{y}.webp` | Terrarium WebP, 30 m Copernicus glo30. The xyz endpoint (avoids range-reading the 705 GB `planet.pmtiles`). |
+| **Elevation (detail ≥z13)** | Mapterhorn regional PMTiles on [Source Cooperative](https://source.coop/mapterhorn/mapterhorn) (`…/mapterhorn/mapterhorn/{6-x-y}.pmtiles`) | Terrarium WebP, **≤10 m** (USGS 3DEP over CONUS; other hi-res sources elsewhere). **457 archives span all continents** — hi-res wherever Mapterhorn has it. Read via HTTP range (CORS-open). One archive per ~622 km z6 region. |
+| **Elevation (base ≤z12)** | Mapterhorn `planet.pmtiles` on [Source Cooperative](https://source.coop/mapterhorn/mapterhorn) | Terrarium WebP, **30 m Copernicus glo30**, global. 705 GB archive but range-read (header + 6.6 KB root dir to open; leaf dirs + tiles on demand) — so the whole DEM shares one S3 range-read path. |
 | **Catalog** | Earth Search STAC API (imagery) · Mapterhorn `download_urls.json` (DEM archive index: bbox + zoom per region) | Queried to find which COGs / which PMTiles archive cover the view. |
 | **Basemap** | CARTO Voyager | Labels/context under the deck layers. |
 
@@ -60,14 +62,17 @@ Terrarium decode: `height = R*256 + G + B/256 - 32768` meters.
 
 ### Terrain fetch (why PMTiles)
 
-Holding 10 m relief across a wide/zoomed-out frame needs hundreds of z13 tiles.
-Over the xyz endpoint those are throttled by deck's `maxRequests` (default 6), so
-they trickle in and the frame never settles. Mapterhorn also publishes the same
-tiles as static **PMTiles** archives (one bundle per z6 region); their tiles are
-Hilbert-contiguous, so range reads **coalesce** and the per-request bottleneck
-disappears. `terrain/mapterhornPmtiles.ts` opens the covering archive (from the
-`download_urls.json` index), caches the `PMTiles` instance, and reads tiles by
-`(z,x,y)`; the `TerrainLayer` `fetch` routes ≥z13 there and ≤z12 to the xyz base.
+All terrain is range-read from Source Cooperative **PMTiles** — no xyz tile
+server. Mapterhorn publishes the DEM as static archives: one global
+`planet.pmtiles` (z0–12, 30 m) plus one regional bundle per z6 region (z13+,
+≤10 m). Their tiles are Hilbert-contiguous, so range reads **coalesce** and the
+browser caches each archive's directory — fewer round-trips than per-tile xyz
+GETs, and the same path at every zoom. `terrain/mapterhornPmtiles.ts` opens the
+covering archive (regional from the `download_urls.json` index; `planet` for the
+base), caches the `PMTiles` instance, and reads tiles by `(z,x,y)` via
+`readTerrainTile`; the `TerrainLayer` `fetch` routes ≤z12 → planet, ≥z13 →
+regional. `coverageAt(lon,lat)` reports which source covers the view so the panel
+label reads "hi-res ≤10 m" or "GLO-30 30 m" by location.
 
 ---
 
@@ -91,8 +96,12 @@ to load the throwaway proof-of-concept instead of the full app.
 
 - **Area** — search a place, draw an AOI box, "FETCH VIEW" to load the current
   view, toggle labels, reset north / default view, pause auto-load on move.
-- **Render** — RGB true-color, or a spectral index (NDVI/NDWI/GNDVI/REDNESS) with
-  a colormap (matplotlib/cmocean + CARTO ramps incl. `bluyl`) + range controls.
+- **Render** — RGB true-color; a **false-color band composite** (Color-IR
+  B08/B04/B03, NIR·G·B) with gain + black-point; or a spectral index
+  (NDVI/NDWI/GNDVI/REDNESS) with a colormap (matplotlib/cmocean + CARTO ramps
+  incl. `bluyl`) + range controls. *(False color stacks raw bands, so it shows
+  the Earth Genome mosaic's per-scene seams; the indices cancel them via the
+  normalized-difference ratio.)*
 - **Terrain** — GO FLAT / GO 3D, an exaggeration slider (1× = true scale), and a
   ground-level datum that drops high terrain toward z=0 so tall ranges read as
   relief instead of floating.
@@ -107,12 +116,12 @@ Everything is in `web/src/`.
 | File | Role |
 |------|------|
 | `App.tsx` | The whole app: state, the `TerrainLayer` + `MosaicLayer` wiring, the panel UI. **Start here.** |
-| `terrain/mapterhornPmtiles.ts` | Reads 10 m (≥z13) DEM tiles directly from Mapterhorn's regional PMTiles on Source Cooperative — archive index (from `download_urls.json`), per-archive `PMTiles` cache, z6-ancestor archive selection, `readTerrainTile(z,x,y)`. |
-| `raster/clampedTerrainLoader.ts` | Custom DEM tile decoder: terrarium → height grid → Martini mesh. Adds a **despeckle** (removes nodata "needle" spikes) and **skirts** (hides tile-edge seams). Decodes both the xyz base and PMTiles detail bytes. |
+| `terrain/mapterhornPmtiles.ts` | Reads all DEM tiles from Mapterhorn's Source Cooperative PMTiles — `planet.pmtiles` base (≤z12) + regional archives (≥z13). Archive index (from `download_urls.json`), per-archive `PMTiles` cache, z6-ancestor selection, `readTerrainTile(z,x,y)`, and `coverageAt(lon,lat)` for the location-aware source label. |
+| `raster/clampedTerrainLoader.ts` | Custom DEM tile decoder: terrarium → height grid → Martini mesh. Adds a **despeckle** (median filter, removes nodata "needle" spikes — tuned light for speed: 1 pass / 3×3) and **skirts** (hides tile-edge seams). |
 | `stac.ts` | STAC search + CORS-host filtering to find COGs for an area/year. |
 | `loadGeotiff.ts`, `getTileData.ts` | Open a COG and read/decode tiles (with a module-level cache). |
-| `renderTile.ts`, `renderPipeline.ts` | deck.gl-raster shader pipelines — RGB gain, NDVI/index math, colormaps. |
-| `shaders/`, `cartoColormaps.ts`, `discardBlack.ts` | GLSL shader modules + colormap helpers. |
+| `renderTile.ts`, `renderPipeline.ts` | deck.gl-raster shader pipelines — RGB gain, false-color band stacks (`FALSE_COLORS`, `buildFalseColorPipeline`), NDVI/index math, colormaps. |
+| `shaders/`, `cartoColormaps.ts`, `discardBlack.ts` | GLSL shader modules (incl. `falseColor.ts` reflectance stretch) + colormap helpers. |
 | `consoleCapture.ts` | Mirrors console errors/warnings into the in-panel log. |
 | `geocode.ts`, `PlaceSearch.tsx`, `prefs.ts`, `loadStats.ts` | Search, persisted prefs, load scoreboard. |
 | `raster/Elevated*.ts`, `elevation.ts` | **Dead code** from the abandoned Path B (hand-rolled mesh z-injection). Kept on the branch; safe to delete. |
@@ -143,18 +152,20 @@ MapLibre GL 5 · react-map-gl 8 · React 19 · Vite. Imagery via Development See
     of COGs. Raising that cap (or fetching from the full pitched `getBounds`)
     fills the edges, at the cost of opening more COGs.
 - **Main-thread jank.** The DEM loader runs `worker: false`, so decode + despeckle
-  + meshing happen on the main thread. Panning can stutter (worse since the
-  terrain fetches z13 tiles via `tileSize: 256`). Moving it to a Web Worker is the
-  next real perf win. (PMTiles fixed *fetch* throughput, not decode cost.)
-- **10 m only at z13+.** Zoom out past ~z12 and the terrain coarsens to 30 m
-  glo30 (the finer data simply doesn't exist below z13). This branch renders that
-  glo30 at **natural LOD across the whole frame** — full relief shape, no flat
-  spots — favoring clean wide shots over 10 m everywhere.
-- **Relief vs. detail is a branch fork.** This branch (`specialty-viz-full-relief`)
-  drops any `extent`/`minZoom` clip for collapse-free dramatic visuals. The
-  sibling `terrain-pmtiles-source-coop` instead *forces* 10 m on zoom-out inside a
-  camera-centered box — sharper, but with a flat collapse past the box edge under
-  tilt. Full-frame 10 m on a wide pitched view is a hard tile-count wall (not done).
+  + meshing happen on the main thread. Despeckle is tuned light (1 pass / 3×3) and
+  `meshMaxError`/cache are capped, but heavy panning can still stutter. Moving the
+  loader to a Web Worker is the real remaining perf win. (PMTiles + source.coop
+  fixed *fetch* throughput, not decode cost.)
+- **Worldwide, hi-res where available.** Terrain renders globally: ≤10 m wherever
+  Mapterhorn has a hi-res regional archive (CONUS, much of Europe, etc.), 30 m
+  glo30 everywhere else and below z13. The panel label reflects which you're on.
+  **Imagery** is the narrower constraint — only Earth Genome items on the
+  CORS-open `data.source.coop` host load, so imagery is patchier than terrain
+  outside that coverage (the rest is on a CORS-blocked bucket).
+- **False color shows mosaic seams.** Raw band stacks (CIR/NIR) don't cancel the
+  Earth Genome mosaic's per-scene brightness offsets the way the ratio indices do,
+  so acquisition seams are visible. No SWIR composites — only the CORS-open 10 m
+  bands (B02/B03/B04/B08) are available.
 - **Steep faces soften slightly.** Drape fidelity is bounded by the terrain mesh /
   cover-texture resolution, not the imagery.
 - **Debug leftovers.** `clampedTerrainLoader.ts` still has a one-shot `parse() RAN`
