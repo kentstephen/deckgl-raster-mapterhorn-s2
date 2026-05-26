@@ -88,6 +88,38 @@ async function loadIndex(): Promise<Map<string, ArchiveEntry>> {
   return indexPromise;
 }
 
+/** Terrain source available at a location: hi-res (a regional archive covers it)
+ *  vs the global glo30 30 m base only. `maxZoom` is the deepest level available
+ *  (12 = base only). */
+export interface TerrainCoverage {
+  hiRes: boolean;
+  maxZoom: number;
+}
+
+/**
+ * What terrain source covers (lon, lat). The index holds ONLY z13+ regional
+ * archives (loadIndex filters the planet base out), so any archive whose bbox
+ * contains the point means hi-res is available there; otherwise it's glo30 30 m.
+ * Picks the deepest-zoom covering archive when several overlap.
+ */
+export async function coverageAt(
+  lon: number,
+  lat: number,
+): Promise<TerrainCoverage> {
+  const idx = await loadIndex();
+  let best: ArchiveEntry | null = null;
+  for (const e of idx.values()) {
+    if (
+      lon >= e.minLon && lon <= e.maxLon &&
+      lat >= e.minLat && lat <= e.maxLat &&
+      (!best || e.maxZoom > best.maxZoom)
+    ) {
+      best = e;
+    }
+  }
+  return best ? { hiRes: true, maxZoom: best.maxZoom } : { hiRes: false, maxZoom: 12 };
+}
+
 /**
  * Name of the regional archive holding tile (z,x,y): its z6 ancestor. Archives
  * are partitioned by z6 tile, so shift the tile coords down to z6.

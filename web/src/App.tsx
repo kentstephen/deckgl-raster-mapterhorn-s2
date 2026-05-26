@@ -7,7 +7,7 @@ import { TerrainLayer } from "@deck.gl/geo-layers";
 import { _TerrainExtension as TerrainExtension } from "@deck.gl/extensions";
 import { ClampedTerrainLoader } from "./raster/clampedTerrainLoader";
 import { parse } from "@loaders.gl/core";
-import { readTerrainTile } from "./terrain/mapterhornPmtiles";
+import { readTerrainTile, coverageAt, type TerrainCoverage } from "./terrain/mapterhornPmtiles";
 import {
   COLORMAP_INDEX,
   createColormapTexture,
@@ -249,6 +249,10 @@ export default function App() {
   // quantized to a band so panning within it doesn't reload the terrain.
   const [groundLevel, setGroundLevel] = useState<boolean>(initialPrefs.groundLevel);
   const [terrainBaseM, setTerrainBaseM] = useState<number>(0);
+  // Terrain source available at the current view center: hi-res (a Mapterhorn
+  // regional archive covers it, ≤10 m) vs the global glo30 30 m base. Drives the
+  // panel label so it reflects where the user actually is. null = not yet known.
+  const [terrainCoverage, setTerrainCoverage] = useState<TerrainCoverage | null>(null);
   // PAUSE freezes the move-driven auto-behaviors (imagery fetch + ground re-
   // leveling) so you can pan/tilt freely without the map reloading under you.
   const [paused, setPaused] = useState<boolean>(false);
@@ -638,6 +642,19 @@ export default function App() {
     mapRef.current?.getMap()?.easeTo({ bearing: 0, pitch: 0, duration: 400 });
   };
 
+  // Refresh which terrain source covers the view center (hi-res ≤10 m vs glo30
+  // 30 m) so the panel label reflects where the user is. Index is fetched once
+  // then cached, so this is a cheap in-memory bbox scan after the first call.
+  const updateTerrainCoverage = useCallback(async () => {
+    const map = mapRef.current?.getMap();
+    if (!map) return;
+    const c = map.getCenter();
+    const cov = await coverageAt(c.lng, c.lat);
+    setTerrainCoverage((prev) =>
+      prev && prev.hiRes === cov.hiRes && prev.maxZoom === cov.maxZoom ? prev : cov,
+    );
+  }, []);
+
   // Sample the in-view ground elevation and set the (quantized) terrain base so
   // high terrain sits near z=0. Samples on-screen points (unproject is robust
   // under pitch), weighted toward the lower/near half of the frame — that's the
@@ -877,6 +894,7 @@ export default function App() {
           if (paused) return; // frozen: no auto-fetch / re-leveling on move
           if (!drawing && e.originalEvent) handleFetchViewport();
           if (groundLevel) updateGroundBase();
+          updateTerrainCoverage();
         }}
         // attributionControl={false}  // comment out to re-enable the (i) badge bottom-right
         attributionControl={false}
@@ -909,6 +927,7 @@ export default function App() {
           // before mapRef was ready). Defaults on, so the opening view lands with
           // high terrain already dropped toward z=0.
           if (groundLevel) updateGroundBase();
+          updateTerrainCoverage();
         }}
       >
         <DeckGLOverlay layers={layers} onDevice={setDevice} />
@@ -978,6 +997,7 @@ export default function App() {
         groundLevel={groundLevel}
         onGroundLevelChange={setGroundLevel}
         terrainBaseM={terrainBaseM}
+        terrainCoverage={terrainCoverage}
       />
     </div>
   );
@@ -1170,6 +1190,7 @@ function InfoPanel({
   groundLevel,
   onGroundLevelChange,
   terrainBaseM,
+  terrainCoverage,
 }: {
   sourceCount: number;
   year: number | null;
@@ -1218,9 +1239,21 @@ function InfoPanel({
   groundLevel: boolean;
   onGroundLevelChange: (v: boolean) => void;
   terrainBaseM: number;
+  terrainCoverage: TerrainCoverage | null;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const pending = Math.max(0, sourceCount - stats.loaded - stats.failed);
+  // Terrain source label, reflecting where the user is: hi-res (a Mapterhorn
+  // regional archive covers the view center, ≤10 m) vs the global Copernicus
+  // GLO-30 30 m base. null = coverage not yet resolved.
+  const terrainSourceLabel =
+    terrainCoverage === null
+      ? "DEM"
+      : terrainCoverage.hiRes
+        ? "hi-res · ≤10 m"
+        : "Copernicus GLO-30 · 30 m";
+  const terrainReliefLabel =
+    terrainCoverage?.hiRes ? "≤10 m relief" : "30 m relief";
   const copyFailures = () => {
     const text = stats.failures.map((f) => `${f.url}\n  ${f.err}`).join("\n\n");
     navigator.clipboard?.writeText(text).catch(() => {});
@@ -1609,22 +1642,18 @@ function InfoPanel({
                 marginBottom: 6,
               }}
             >
-              terrain · USGS 3DEP 10 m
+              terrain · {terrainSourceLabel}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
               <Toggle
                 active={terrainEnabled}
                 onClick={() => onTerrainEnabledChange(!terrainEnabled)}
-                title="Toggle between flat imagery and 3D terrain (Mapterhorn USGS 3DEP 10 m, z13+)."
+                title="Toggle between flat imagery and 3D terrain (Mapterhorn DEM: hi-res ≤10 m where available, else Copernicus GLO-30 30 m)."
               >
                 {terrainEnabled ? "GO FLAT" : "GO 3D"}
               </Toggle>
               <span style={{ fontFamily: UI.mono, fontSize: 10.5, color: UI.faint }}>
-                {!terrainEnabled
-                  ? "currently flat"
-                  : terrainActive
-                    ? "3D · 10 m relief"
-                    : "3D · zoom in past z13"}
+                {!terrainEnabled ? "currently flat" : `3D · ${terrainReliefLabel}`}
               </span>
             </div>
             {terrainEnabled && (
