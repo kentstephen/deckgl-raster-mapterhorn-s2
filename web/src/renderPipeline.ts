@@ -5,7 +5,7 @@ import {
   LinearRescale,
 } from "@developmentseed/deck.gl-raster/gpu-modules";
 import type { Texture } from "@luma.gl/core";
-import { discardBlack, discardBoundlessPadding } from "./discardBlack";
+import { discardBoundlessPadding, discardIncompleteBands } from "./discardBlack";
 import { NormalizedDifference } from "./shaders/ndvi";
 import { ScaleColor } from "./shaders/scaleColor";
 import { FalseColorStretch } from "./shaders/falseColor";
@@ -149,7 +149,7 @@ export function buildFalseColorPipeline(opts: {
   gain?: number;
 }): RasterModule[] {
   return [
-    { module: discardBlack },
+    { module: discardIncompleteBands },
     {
       module: FalseColorStretch,
       props: { blackPoint: opts.blackPoint ?? 0.0, gain: opts.gain ?? 8.0 },
