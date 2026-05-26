@@ -47,16 +47,17 @@ const MAX_ELEV_M = 9000;
 // all real terrain, so real relief survives while needles/ringing get cleaned.
 const DESPECKLE_T = 120;
 
-// Number of median-replace passes. Iterating dissolves clustered spikes (lossy-
-// WebP ringing) that a single pass leaves behind. 3 handles clusters several
-// pixels wide; clean terrain is unaffected.
-const DESPECKLE_PASSES = 3;
+// Number of median-replace passes. More passes dissolve clustered spikes (lossy-
+// WebP ringing) but cost is linear in passes × window area, ON THE MAIN THREAD,
+// per tile — the dominant terrain-load cost. Cut 3→1 for speed; isolated needles
+// (the common case) are caught in one pass. Raise back toward 3 if spike
+// clusters reappear and the tradeoff is worth the slowdown.
+const DESPECKLE_PASSES = 1;
 
-// Median window radius. r=1 → 3×3 (9 samples), r=2 → 5×5 (25 samples). A 3×3
-// median is polluted when ≥half its samples are bad — i.e. it fails on CLUSTERS
-// of spikes and at tile edges (few valid neighbors). r=2 tolerates up to ~12 bad
-// samples, so it survives small clusters. Heavier per pixel; revisit if jank.
-const DESPECKLE_R = 2;
+// Median window radius. r=1 → 3×3 (9 samples), r=2 → 5×5 (25 samples). 5×5 is
+// ~2.8× the per-pixel work of 3×3. Cut 2→1 for speed; a 3×3 median still removes
+// isolated spikes (most of them). Bump back to 2 if clusters/edges need it.
+const DESPECKLE_R = 1;
 
 type ElevationDecoder = {
   rScaler: number;
