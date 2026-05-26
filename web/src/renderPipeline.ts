@@ -5,9 +5,10 @@ import {
   LinearRescale,
 } from "@developmentseed/deck.gl-raster/gpu-modules";
 import type { Texture } from "@luma.gl/core";
-import { discardBoundlessPadding } from "./discardBlack";
+import { discardBlack, discardBoundlessPadding } from "./discardBlack";
 import { NormalizedDifference } from "./shaders/ndvi";
 import { ScaleColor } from "./shaders/scaleColor";
+import { FalseColorStretch } from "./shaders/falseColor";
 
 /** Sentinel-2 band assets we pull per item (RGB uses the precomposed TCI). */
 export type BandKey = "B02" | "B03" | "B04" | "B08";
@@ -36,11 +37,43 @@ export const INDICES = {
 export type IndexKey = keyof typeof INDICES;
 export const INDEX_KEYS = Object.keys(INDICES) as IndexKey[];
 
-/** "rgb" renders the precomposed TCI via COGLayer; the rest are GPU indices. */
-export type RenderMode = "rgb" | IndexKey;
+/**
+ * False-color band composites: raw bands stacked straight into R/G/B (no ratio,
+ * no colormap). Unlike the normalized-difference indices these do NOT cancel
+ * per-scene brightness offsets, so they show the Earth Genome mosaic's
+ * acquisition seams — accepted tradeoff for true band-composite views.
+ *
+ * Only the CORS-open 10 m bands are available (B02/B03/B04/B08); no SWIR
+ * (B11/B12 are 20 m + CORS-blocked), so the family is the NIR-driven composites.
+ * `r/g/b` name the band fed to each output channel.
+ */
+export const FALSE_COLORS = {
+  // Color-Infrared (CIR): NIR→red, red→green, green→blue. Vegetation glows red;
+  // the classic Sentinel/Landsat 8-4-3 composite.
+  cir: { label: "COLOR IR", r: "B08", g: "B04", b: "B03", desc: "vegetation (NIR)" },
+  // NIR-G-B variant: NIR→red, green→green, blue→blue. Higher contrast on water
+  // and bare soil than CIR.
+  nirgb: { label: "NIR · G · B", r: "B08", g: "B03", b: "B02", desc: "NIR / water / soil" },
+} as const satisfies Record<
+  string,
+  { label: string; r: BandKey; g: BandKey; b: BandKey; desc: string }
+>;
+
+export type FalseColorKey = keyof typeof FALSE_COLORS;
+export const FALSE_COLOR_KEYS = Object.keys(FALSE_COLORS) as FalseColorKey[];
+
+/**
+ * "rgb" renders the precomposed TCI via COGLayer; index keys are GPU
+ * normalized-difference ratios; false-color keys are raw 3-band stacks.
+ */
+export type RenderMode = "rgb" | IndexKey | FalseColorKey;
+
+export function isFalseColorMode(mode: RenderMode): mode is FalseColorKey {
+  return (FALSE_COLOR_KEYS as string[]).includes(mode);
+}
 
 export function isIndexMode(mode: RenderMode): mode is IndexKey {
-  return mode !== "rgb";
+  return mode !== "rgb" && !isFalseColorMode(mode);
 }
 
 /**
@@ -90,6 +123,44 @@ export function bandSlotsFor(mode: IndexKey): Record<"a" | "b", BandKey> {
 
 /** Composite packing: index input `a`→color.r, `b`→color.g (uniform for all indices). */
 export const INDEX_COMPOSITE = { r: "a", g: "b" } as const;
+
+/**
+ * MultiCOGLayer `sources` slot → STAC asset map for a false-color mode. Slots
+ * are named by output channel (`r`/`g`/`b`); FALSE_COLOR_COMPOSITE maps each
+ * straight through.
+ */
+export function falseColorBandSlots(
+  mode: FalseColorKey,
+): Record<"r" | "g" | "b", BandKey> {
+  const { r, g, b } = FALSE_COLORS[mode];
+  return { r, g, b };
+}
+
+/** Composite packing for false color: each named slot → its own output channel. */
+export const FALSE_COLOR_COMPOSITE = { r: "r", g: "g", b: "b" } as const;
+
+/**
+ * Pipeline for a false-color band stack: cull padding/black, then a per-channel
+ * reflectance stretch (the raw r16unorm bands are near-black without it). No
+ * colormap — the bands ARE the color.
+ */
+export function buildFalseColorPipeline(opts: {
+  blackPoint?: number;
+  gain?: number;
+}): RasterModule[] {
+  return [
+    { module: discardBlack },
+    {
+      module: FalseColorStretch,
+      props: { blackPoint: opts.blackPoint ?? 0.0, gain: opts.gain ?? 8.0 },
+    },
+  ];
+}
+
+/** Default false-color stretch. Bands are r16unorm; reflectance fills a small
+ *  slice of [0,1], so gain >> 1. Tunable in the panel. */
+export const DEFAULT_FALSE_COLOR_GAIN = 8.0;
+export const DEFAULT_FALSE_COLOR_BLACK = 0.0;
 
 export function buildRenderPipeline(
   mode: RenderMode,

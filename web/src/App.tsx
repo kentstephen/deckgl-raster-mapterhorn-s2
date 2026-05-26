@@ -60,13 +60,21 @@ import { renderTile } from "./renderTile";
 import {
   bandSlotsFor,
   buildRenderPipeline,
+  buildFalseColorPipeline,
   DEFAULT_NDVI_COLORMAP,
   DEFAULT_NDVI_RANGE,
   DEFAULT_NDVI_SCALE,
+  DEFAULT_FALSE_COLOR_GAIN,
+  DEFAULT_FALSE_COLOR_BLACK,
   INDEX_COMPOSITE,
   INDICES,
   INDEX_KEYS,
   isIndexMode,
+  isFalseColorMode,
+  FALSE_COLORS,
+  FALSE_COLOR_KEYS,
+  falseColorBandSlots,
+  FALSE_COLOR_COMPOSITE,
   NDVI_COLORMAPS,
   type NdviColormap,
   type RenderMode,
@@ -219,6 +227,9 @@ export default function App() {
   const [ndviRange, setNdviRange] = useState<[number, number]>(initialPrefs.ndviRange);
   const [ndviScale, setNdviScale] = useState<number>(initialPrefs.ndviScale);
   const [ndviReversed, setNdviReversed] = useState<boolean>(initialPrefs.ndviReversed);
+  // False-color reflectance stretch (CIR etc.): raw r16unorm bands need gain >> 1.
+  const [falseColorGain, setFalseColorGain] = useState<number>(DEFAULT_FALSE_COLOR_GAIN);
+  const [falseColorBlack, setFalseColorBlack] = useState<number>(DEFAULT_FALSE_COLOR_BLACK);
   const [device, setDevice] = useState<Device | null>(null);
   const [colormapTexture, setColormapTexture] = useState<Texture | null>(null);
   // name → row index in the CARTO-augmented colormap texture. Populated once the
@@ -796,6 +807,54 @@ export default function App() {
       return [...base, mosaic];
     }
 
+    // False color: raw 3-band stack (CIR etc.) via the MultiCOGLayer composite
+    // path — no colormap, no ratio. NOT seam-free (raw reflectance carries the
+    // mosaic's per-scene offsets), accepted tradeoff for true band composites.
+    if (isFalseColorMode(mode)) {
+      const fcSlots = falseColorBandSlots(mode);
+      const fcPipeline = buildFalseColorPipeline({
+        gain: falseColorGain,
+        blackPoint: falseColorBlack,
+      });
+      const mosaic = new MosaicLayer<PartialSTACItem, null>({
+        id: `s2-mosaic-${mode}-${gen}`,
+        sources: stacItems,
+        maxCacheSize: 0,
+        getSource: async () => null,
+        renderSource: (source) => {
+          const cacheKey = `${mode}-${source.id}`;
+          let sources = sourcesCache.current.get(cacheKey);
+          if (!sources) {
+            sources = Object.fromEntries(
+              Object.entries(fcSlots).map(([slot, bandKey]) => [
+                slot,
+                { url: source.assets[bandKey].href },
+              ]),
+            );
+            sourcesCache.current.set(cacheKey, sources);
+          }
+          return new (MultiCOGLayer as any)({
+            id: `s2-multi-${mode}-${gen}-${source.id}`,
+            sources,
+            composite: FALSE_COLOR_COMPOSITE,
+            renderPipeline: fcPipeline,
+            epsgResolver,
+            signal: genSignal,
+            refinementStrategy: "best-available",
+            maxRequests: 16,
+            extensions: terrainActive ? [terrainExtension] : [],
+            terrainDrawMode: "drape",
+            updateTriggers: {
+              renderTile: [mode, falseColorGain, falseColorBlack],
+            },
+          } as any);
+        },
+        // @ts-expect-error beforeId is injected by @deck.gl/mapbox
+        beforeId: labelBeforeId,
+      });
+      return [...base, mosaic];
+    }
+
     // Spectral indices: need a 2-band ratio, so keep the MultiCOGLayer composite
     // path. Normalized-difference indices are seam-free (the ratio cancels
     // per-edge brightness offsets).
@@ -857,7 +916,7 @@ export default function App() {
       beforeId: labelBeforeId,
     });
     return [...base, mosaic];
-  }, [stacItems, labelBeforeId, mode, gen, colormapTexture, colormapIndexMap, rgbGain, smoothing, terrainActive, terrainLayer, terrainExtension, ndviColormap, ndviRange, ndviScale, ndviReversed]);
+  }, [stacItems, labelBeforeId, mode, gen, colormapTexture, colormapIndexMap, rgbGain, smoothing, terrainActive, terrainLayer, terrainExtension, ndviColormap, ndviRange, ndviScale, ndviReversed, falseColorGain, falseColorBlack]);
 
   // A user-saved "home" view (SET DEFAULT button) wins; else the San Juans
   // default. Read once at mount via useRef so re-renders don't reset the camera.
@@ -961,6 +1020,10 @@ export default function App() {
         onModeChange={setMode}
         rgbGain={rgbGain}
         onRgbGainChange={setRgbGain}
+        falseColorGain={falseColorGain}
+        onFalseColorGainChange={setFalseColorGain}
+        falseColorBlack={falseColorBlack}
+        onFalseColorBlackChange={setFalseColorBlack}
         ndviColormap={ndviColormap}
         onNdviColormapChange={setNdviColormap}
         ndviRange={ndviRange}
@@ -1154,6 +1217,10 @@ function InfoPanel({
   onModeChange,
   rgbGain,
   onRgbGainChange,
+  falseColorGain,
+  onFalseColorGainChange,
+  falseColorBlack,
+  onFalseColorBlackChange,
   ndviColormap,
   onNdviColormapChange,
   ndviRange,
@@ -1203,6 +1270,10 @@ function InfoPanel({
   onModeChange: (m: RenderMode) => void;
   rgbGain: number;
   onRgbGainChange: (v: number) => void;
+  falseColorGain: number;
+  onFalseColorGainChange: (v: number) => void;
+  falseColorBlack: number;
+  onFalseColorBlackChange: (v: number) => void;
   ndviColormap: NdviColormap;
   onNdviColormapChange: (c: NdviColormap) => void;
   ndviRange: [number, number];
@@ -1457,18 +1528,27 @@ function InfoPanel({
             RGB
           </Toggle>
           <select
-            value={isIndexMode(mode) ? mode : ""}
+            value={mode === "rgb" ? "" : mode}
             onChange={(e) => onModeChange(e.target.value as RenderMode)}
             style={{ ...selectStyle, flex: 1, textTransform: "uppercase" }}
           >
             <option value="" disabled style={{ background: "#15191f" }}>
-              spectral index…
+              spectral / false color…
             </option>
-            {INDEX_KEYS.map((k) => (
-              <option key={k} value={k} style={{ background: "#15191f" }}>
-                {INDICES[k].label} · {INDICES[k].desc}
-              </option>
-            ))}
+            <optgroup label="False color" style={{ background: "#15191f" }}>
+              {FALSE_COLOR_KEYS.map((k) => (
+                <option key={k} value={k} style={{ background: "#15191f" }}>
+                  {FALSE_COLORS[k].label} · {FALSE_COLORS[k].desc}
+                </option>
+              ))}
+            </optgroup>
+            <optgroup label="Spectral index" style={{ background: "#15191f" }}>
+              {INDEX_KEYS.map((k) => (
+                <option key={k} value={k} style={{ background: "#15191f" }}>
+                  {INDICES[k].label} · {INDICES[k].desc}
+                </option>
+              ))}
+            </optgroup>
           </select>
         </div>
 
@@ -1491,7 +1571,9 @@ function InfoPanel({
           >
             {mode === "rgb"
               ? "RGB · true color"
-              : `${INDICES[mode].label} · ${INDICES[mode].desc}`}
+              : isFalseColorMode(mode)
+                ? `${FALSE_COLORS[mode].label} · ${FALSE_COLORS[mode].desc}`
+                : `${INDICES[mode].label} · ${INDICES[mode].desc}`}
           </div>
 
           {mode === "rgb" && (
@@ -1530,6 +1612,31 @@ function InfoPanel({
                 </span>
               </div>
 
+            </>
+          )}
+
+          {isFalseColorMode(mode) && (
+            <>
+              <Slider
+                label="gain"
+                value={falseColorGain}
+                min={1}
+                max={30}
+                onChange={onFalseColorGainChange}
+                onReset={() => onFalseColorGainChange(DEFAULT_FALSE_COLOR_GAIN)}
+              />
+              <Slider
+                label="black point"
+                value={falseColorBlack}
+                min={0}
+                max={0.2}
+                step={0.005}
+                onChange={onFalseColorBlackChange}
+                onReset={() => onFalseColorBlackChange(DEFAULT_FALSE_COLOR_BLACK)}
+              />
+              <div style={{ fontFamily: UI.mono, fontSize: 10.5, color: UI.faint, marginTop: 4 }}>
+                raw band stack · shows mosaic seams
+              </div>
             </>
           )}
 

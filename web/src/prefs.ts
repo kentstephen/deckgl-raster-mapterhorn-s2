@@ -10,6 +10,7 @@ import {
   DEFAULT_NDVI_SCALE,
   INDEX_COLORMAPS,
   INDEX_KEYS,
+  FALSE_COLOR_KEYS,
   type NdviColormap,
   type RenderMode,
 } from "./renderPipeline";
@@ -49,7 +50,7 @@ export const DEFAULT_COLOR_PREFS: ColorPrefs = {
   groundLevel: true,
 };
 
-const VALID_MODES: readonly string[] = ["rgb", ...INDEX_KEYS];
+const VALID_MODES: readonly string[] = ["rgb", ...INDEX_KEYS, ...FALSE_COLOR_KEYS];
 
 const num = (v: unknown, fallback: number) =>
   typeof v === "number" && Number.isFinite(v) ? v : fallback;
