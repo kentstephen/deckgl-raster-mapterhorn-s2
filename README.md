@@ -121,7 +121,7 @@ Everything is in `web/src/`.
 | `stac.ts` | STAC search + CORS-host filtering to find COGs for an area/year. |
 | `loadGeotiff.ts`, `getTileData.ts` | Open a COG and read/decode tiles (with a module-level cache). |
 | `renderTile.ts`, `renderPipeline.ts` | deck.gl-raster shader pipelines — RGB gain, false-color band stacks (`FALSE_COLORS`, `buildFalseColorPipeline`), NDVI/index math, colormaps. |
-| `shaders/`, `cartoColormaps.ts`, `discardBlack.ts` | GLSL shader modules (incl. `falseColor.ts` reflectance stretch) + colormap helpers. |
+| `shaders/`, `cartoColormaps.ts`, `discardBlack.ts` | GLSL shader modules (incl. `falseColor.ts` reflectance stretch) + colormap helpers. `discardBlack.ts` also holds `discardIncompleteBands` (drops false-color pixels missing a band, so streaming tiles don't cache black) and `discardBoundlessPadding`. |
 | `consoleCapture.ts` | Mirrors console errors/warnings into the in-panel log. |
 | `geocode.ts`, `PlaceSearch.tsx`, `prefs.ts`, `loadStats.ts` | Search, persisted prefs, load scoreboard. |
 | `raster/Elevated*.ts`, `elevation.ts` | **Dead code** from the abandoned Path B (hand-rolled mesh z-injection). Kept on the branch; safe to delete. |
@@ -165,7 +165,10 @@ MapLibre GL 5 · react-map-gl 8 · React 19 · Vite. Imagery via Development See
 - **False color shows mosaic seams.** Raw band stacks (CIR/NIR) don't cancel the
   Earth Genome mosaic's per-scene brightness offsets the way the ratio indices do,
   so acquisition seams are visible. No SWIR composites — only the CORS-open 10 m
-  bands (B02/B03/B04/B08) are available.
+  bands (B02/B03/B04/B08) are available. While a tile's three band COGs stream in,
+  the composite stays transparent (terrain shows through) and fills when complete
+  — `discardIncompleteBands` drops any pixel missing a band, so half-loaded tiles
+  no longer cache as black voids.
 - **Steep faces soften slightly.** Drape fidelity is bounded by the terrain mesh /
   cover-texture resolution, not the imagery.
 - **Debug leftovers.** `clampedTerrainLoader.ts` still has a one-shot `parse() RAN`
