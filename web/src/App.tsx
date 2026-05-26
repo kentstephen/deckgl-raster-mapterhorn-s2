@@ -121,6 +121,16 @@ const ELEVATION_SCALE_MAX = 10;
 // if dark aprons flash at steep tile edges.
 const TERRAIN_SKIRT_M = 80;
 
+// Memory tuning (terrain meshes are the hog: Float32 vertex arrays from Martini).
+// meshMaxError = the mesh simplification tolerance in decoded z-units; HIGHER =
+// fewer triangles per tile = less GPU/CPU memory, slight loss of fine relief.
+// (Was 4 = very fine; 8 roughly halves vertex count.)
+const TERRAIN_MESH_MAX_ERROR = 8;
+// Hard cap on cached terrain tile meshes (deck TileLayer otherwise hoards every
+// tile you've panned over). Bounds memory; too low → re-fetch/re-mesh jank when
+// you pan back. Tune to taste.
+const TERRAIN_MAX_CACHE_TILES = 200;
+
 // SPECIALTY VIZ: no extent/minZoom box. Terrain renders at natural LOD across the
 // whole frame for clean, dramatic, collapse-free shots — glo30 (30 m) when wide,
 // 10 m PMTiles as you push in past ~z12 (tileSize:256 shifts the fetched tile-zoom
@@ -302,7 +312,7 @@ export default function App() {
       // as a cover texture on this mesh — no competing offset mesh to poke
       // through, and it follows the full relief.
       operation: "terrain+draw" as any,
-      meshMaxError: 4,
+      meshMaxError: TERRAIN_MESH_MAX_ERROR,
       color: [38, 42, 46],
       // Seam fix: TerrainLayer's default skirt is meshMaxError*2 (~8 decoded
       // units ≈ a few meters), too short to hide the cracks between independently
@@ -321,6 +331,9 @@ export default function App() {
       // Detail tiles now range-read from PMTiles (coalesced), so the default 6 is
       // overly cautious — let more meshing run in parallel so the frame settles.
       maxRequests: 20,
+      // Bound cached meshes (deck otherwise keeps every panned-over tile). Caps
+      // terrain memory; raise if panning back re-fetches/re-meshes too often.
+      maxCacheSize: TERRAIN_MAX_CACHE_TILES,
       // SPECIALTY VIZ: no `extent`/`minZoom` clip. The terrain renders at NATURAL
       // LOD across the WHOLE frame — full relief shape everywhere, no flat
       // box-edge collapse (the collapse was the cost of forcing 10 m on zoom-out).
